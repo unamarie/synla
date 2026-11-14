@@ -1,25 +1,61 @@
-"""Everything Synla keeps lives in one folder on your own computer (default: ~/.synla). Nothing is sent anywhere."""
+"""Everything Synla keeps lives in one folder on your own computer. Nothing is sent anywhere.
+
+Windows: %LOCALAPPDATA%\\Synla. Local AppData stays on this computer: it is not part of a roaming profile and is
+not synced to OneDrive, so the data does not end up on company servers.
+Mac and Linux: ~/.synla. Set SYNLA_HOME to use another folder.
+"""
+import hashlib
+import hmac
 import json
 import os
-from datetime import datetime
+import secrets
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import protect
+
 DEFAULT_CONFIG = {
-    "projects": {
-        "Internal": {"keywords": []},
-    },
+    "projects": {"Internal": {"keywords": []}},
     "workday": {"start": "07:00", "end": "17:00"},
     "roundMinutes": 15,
-    "keepDays": 90,
-    "source": "activitywatch",
+    "keepDays": 90,            # your answers and the answer log
+    "keepWindowDays": 30,      # window names; after this only project, kind and time remain
+    "source": "auto",          # auto, synla, activitywatch, or a path to a JSON file (the demo)
     "activityWatchUrl": "http://localhost:5600",
+    "idleMinutes": 3,          # no keyboard or mouse for this long counts as away, unless you are in a call
+    "detectCalls": True,       # ask Windows whether an app is using the microphone (never what is said)
+    "privacy": {
+        # windows from these apps, or with these words in the title, are recorded as "Private" with no name
+        "skipApps": ["keepass.exe", "keepassxc.exe", "1password.exe", "bitwarden.exe", "lastpass.exe"],
+        "skipTitleWords": ["InPrivate", "Incognito", "Private Browsing", "Privat nettlesing", "nettbank",
+                           "Helsenorge"],
+    },
 }
+
+
+def default_dir() -> Path:
+    if os.environ.get("SYNLA_HOME"):
+        return Path(os.environ["SYNLA_HOME"])
+    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "Synla"
+    return Path.home() / ".synla"
+
+
+def utc_key(t: datetime) -> str:
+    """Answers are keyed by the start of a stretch in UTC, so summer time and travel do not lose them."""
+    return t.astimezone(timezone.utc).isoformat(timespec="milliseconds")
 
 
 class Store:
     def __init__(self, folder: str | os.PathLike | None = None):
-        self.dir = Path(folder or os.environ.get("SYNLA_HOME") or Path.home() / ".synla")
+        self.dir = Path(folder) if folder else default_dir()
         self.dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            try:
+                os.chmod(self.dir, 0o700)          # only your account can open the folder
+            except OSError:
+                pass
 
     def _read(self, name, default):
         p = self.dir / name
@@ -33,34 +69,51 @@ class Store:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, p)
 
-    # config.json: your projects and keywords. Edit it by hand or from the review page.
+    # config.json: your projects, keywords and privacy settings. Edit by hand or from the review page.
     def config(self) -> dict:
         c = self._read("config.json", None)
         if c is None:
             c = json.loads(json.dumps(DEFAULT_CONFIG))
             self._write("config.json", c)
-        return {**DEFAULT_CONFIG, **c}
+        merged = {**DEFAULT_CONFIG, **c}
+        merged["privacy"] = {**DEFAULT_CONFIG["privacy"], **c.get("privacy", {})}
+        return merged
 
     def save_config(self, c: dict):
         self._write("config.json", c)
 
-    # memory.json: what Synla has learned from your answers
+    # key: a random secret that turns learned clues into one-way codes. Encrypted with DPAPI on Windows.
+    def key(self) -> bytes:
+        p = self.dir / "key.bin"
+        if p.exists():
+            return protect.unprotect(p.read_bytes())
+        k = secrets.token_bytes(32)
+        p.write_bytes(protect.protect(k))
+        return k
+
+    def hasher(self):
+        k = self.key()
+        return lambda text: hmac.new(k, text.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+    # memory.json: what Synla has learned, stored as one-way codes, never as readable names
     def memory(self) -> dict:
-        return self._read("memory.json", {})
+        m = self._read("memory.json", {})
+        return m if m.get("version") == 2 else {}
 
     def save_memory(self, m: dict):
-        self._write("memory.json", m)
+        self._write("memory.json", {"version": 2, **m})
 
-    # decisions.json: your answer for each segment, keyed by its start time. The timesheet uses these first.
+    # decisions.json: your answer for each stretch of time, keyed by its start (UTC), with its end.
+    # The timesheet uses these first, and they remain after window names are deleted.
     def decisions(self) -> dict:
         return self._read("decisions.json", {})
 
     def save_decisions(self, d: dict):
         self._write("decisions.json", d)
 
-    # corrections.jsonl: an append-only log of every answer, so you can see how often Synla was wrong
+    # corrections.jsonl: a log of every answer, so you can see how often Synla was wrong
     def log(self, entry: dict):
-        entry = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), **entry}
+        entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **entry}
         with open(self.dir / "corrections.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -70,9 +123,36 @@ class Store:
             return []
         return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
 
-    def forget_before(self, cutoff: datetime):
-        """Delete answers older than the retention period (keepDays)."""
+    # pause.json: when recording is paused until
+    def paused_until(self) -> datetime | None:
+        v = self._read("pause.json", {}).get("until")
+        t = datetime.fromisoformat(v) if v else None
+        return t if t and t > datetime.now(timezone.utc) else None
+
+    def pause(self, minutes: float | None):
+        until = datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
+        self._write("pause.json", {"until": until.isoformat() if until else None})
+
+    # ---- retention ---------------------------------------------------------------------------------------------
+    def forget(self, keep_days: int):
+        """Delete answers and log entries older than keep_days. Window names are pruned by the recorder."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
         d = self.decisions()
         keep = {k: v for k, v in d.items() if datetime.fromisoformat(k) >= cutoff}
         if len(keep) != len(d):
             self.save_decisions(keep)
+        log = self.corrections()
+        recent = [e for e in log if datetime.fromisoformat(e["at"]) >= cutoff]
+        if len(recent) != len(log):
+            tmp = self.dir / "corrections.jsonl.tmp"
+            tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in recent), encoding="utf-8")
+            os.replace(tmp, self.dir / "corrections.jsonl")
+
+    def delete_everything(self):
+        """Removes all of Synla's data. Your settings (config.json) stay, so you can start again."""
+        for name in ("decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json",
+                     "activity.db", "activity.db-wal", "activity.db-shm"):
+            try:
+                (self.dir / name).unlink()
+            except FileNotFoundError:
+                pass

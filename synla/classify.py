@@ -9,6 +9,9 @@ Each feature votes for labels; a feature's vote is split across the labels it ha
 always means the same thing counts fully and a clue seen everywhere ("app:excel") counts little.
 Confidence is how clearly the winner beats the runner-up, damped when there is little evidence overall.
 The model is deliberately simple so the reasons can be shown to the user: "file:budget 2027 → Budget".
+
+Privacy: what is learned is stored as one-way codes (a keyed hash of each clue), never as readable file names or
+email subjects. The reasons shown on the review page come from the window in front of you, not from memory.
 """
 import math
 from collections import defaultdict
@@ -30,12 +33,19 @@ RULE_WEIGHT = 3.0
 ASK_BELOW = 0.7      # blocks under this confidence are shown first and highlighted
 
 
+def _plain(text: str) -> str:
+    return text
+
+
 class Classifier:
-    def __init__(self, config: dict, memory: dict | None = None):
+    def __init__(self, config: dict, memory: dict | None = None, hasher=None):
         self.config = config
+        self.hasher = hasher or _plain
         # memory[target][feature][label] = votes, where target is "project" or "kind"
         self.memory = {t: defaultdict(lambda: defaultdict(float)) for t in ("project", "kind")}
         for t, feats in (memory or {}).items():
+            if t not in self.memory:
+                continue
             for f, labels in feats.items():
                 for label, n in labels.items():
                     self.memory[t][f][label] = n
@@ -43,10 +53,22 @@ class Classifier:
                                  for p, v in config.get("projects", {}).items()}
 
     # ---- learning --------------------------------------------------------------------------------------------
-    def learn(self, app: str, title: str, project: str, kind: str, weight: float = 1.0):
-        for f in features(app, title):
-            self.memory["project"][f][project] += weight
-            self.memory["kind"][f][kind] += weight
+    def code(self, f: str) -> str:
+        """The stored form of a clue: its type in plain text (for weighting), the rest as a one-way code."""
+        typ = f.split(":", 1)[0]
+        return f"{typ}:{self.hasher(f)}"
+
+    def learn(self, app: str, title: str, project: str, kind: str, weight: float = 1.0, call: bool = False):
+        """weight -1 takes back an earlier answer, when you change your mind."""
+        for f in features(app, title, call):
+            c = self.code(f)
+            for target, label in (("project", project), ("kind", kind)):
+                votes = self.memory[target][c]
+                votes[label] = votes.get(label, 0.0) + weight
+                if votes[label] <= 0:
+                    del votes[label]
+                if not votes:
+                    del self.memory[target][c]
 
     def dump(self) -> dict:
         return {t: {f: dict(labels) for f, labels in feats.items()} for t, feats in self.memory.items()}
@@ -56,7 +78,7 @@ class Classifier:
         votes, why = defaultdict(float), defaultdict(list)
         for f in feats:
             w = TYPE_WEIGHT.get(f.split(":", 1)[0], 1.0)
-            seen = self.memory[target].get(f)
+            seen = self.memory[target].get(self.code(f))
             if seen:
                 total = sum(seen.values())
                 for label, n in seen.items():
@@ -89,8 +111,8 @@ class Classifier:
         strength = 1 - math.exp(-top / 2.5)       # little evidence -> low confidence even if unanimous
         return label, round(share * strength, 3)
 
-    def guess(self, app: str, title: str) -> Guess:
-        feats = features(app, title)
+    def guess(self, app: str, title: str, call: bool = False) -> Guess:
+        feats = features(app, title, call)
         pv, pwhy = self._votes("project", feats)
         kv, kwhy = self._votes("kind", feats)
         project, pc = self._pick(pv)
