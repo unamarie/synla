@@ -23,6 +23,7 @@ from . import protect
 POLL = 5.0                      # seconds between samples
 GAP = POLL * 3                  # a longer gap (sleep, crash) starts a new row
 PRUNE_EVERY = 3600              # seconds
+SEAL_EVERY = 6 * 3600           # seconds between checks for weeks that should be sealed
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS activity (
     start REAL NOT NULL,        -- seconds since 1970, UTC
@@ -184,12 +185,12 @@ class _Row:
     end: float
 
 
-def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None = None):
+def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None = None, seal_weeks: bool = True):
     """The recording loop. polls limits the number of samples (used by tests); None runs until stopped."""
     probe = probe or WindowsProbe()
     db = connect(store)
     last: _Row | None = None
-    last_prune = 0.0
+    last_prune = last_seal = 0.0
     n = 0
     try:
         while polls is None or n < polls:
@@ -201,6 +202,13 @@ def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None 
                     db.execute("DELETE FROM activity WHERE end < ?",
                                (now - float(config.get("keepWindowDays", 30)) * 86400,))
                 last_prune = now
+            if seal_weeks and now - last_seal > SEAL_EVERY:
+                last_seal = now
+                try:                       # weeks that ended a week ago are sealed even if you never open Synla
+                    from .app import Synla
+                    Synla(store).auto_seal()
+                except Exception:
+                    pass
             state = None
             paused = store.paused_until()
             if not paused:

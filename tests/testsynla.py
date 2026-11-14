@@ -7,8 +7,10 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from synla import demo, protect, recorder, report
+from synla import demo, protect, record, recorder, report, workload
+from synla.__main__ import verify
 from synla.app import DELETED, Synla
+from synla.model import MANUAL_APP
 from synla.blocks import segments
 from synla.classify import Classifier
 from synla.context import features
@@ -216,13 +218,13 @@ class FakeWindows:
         return self.now()[3]
 
 
-def record(store, script, start):
+def play(store, script, start):
     probe, t = FakeWindows(script), [start.timestamp()]
 
     def sleep(_):
         probe.i += 1
         t[0] += recorder.POLL
-    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(script))
+    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(script), seal_weeks=False)
 
 
 EXCEL = ("EXCEL.EXE", "Budget 2027.xlsx - Excel", 0, False)
@@ -237,7 +239,7 @@ def test_recorder_keeps_calls_skips_private_windows_and_away_time(tmp_path):
         [("keepass.exe", "Passwords - KeePass", 0, False), ("msedge.exe", "Bank [InPrivate] - Microsoft Edge", 0, False)] + \
         [EXCEL] * 2 + [(None, None, 0, False)]
     start = MONDAY.replace(hour=9)
-    record(store, script, start)
+    play(store, script, start)
     db = recorder.connect(store)
     raw = db.execute("SELECT kind, app, title FROM activity").fetchall()
     db.close()
@@ -254,11 +256,11 @@ def test_recorder_trims_to_the_last_input_and_respects_pause(tmp_path):
     store = Store(tmp_path)
     start = MONDAY.replace(hour=9)
     # five minutes of work, then the idle limit is passed: the stretch ends at the last input, 200 seconds earlier
-    record(store, [EXCEL] * 60 + [("EXCEL.EXE", "Budget 2027.xlsx - Excel", 200, False)], start)
+    play(store, [EXCEL] * 60 + [("EXCEL.EXE", "Budget 2027.xlsx - Excel", 200, False)], start)
     win, _ = SynlaRecorder(store).events(start, start + timedelta(hours=1))
     assert len(win) == 1 and round(win[0]["duration"]) == 100
     store.pause(30)
-    record(store, [EXCEL] * 5, start + timedelta(minutes=10))
+    play(store, [EXCEL] * 5, start + timedelta(minutes=10))
     win2, _ = SynlaRecorder(store).events(start, start + timedelta(hours=1))
     assert len(win2) == len(win)
 
@@ -267,13 +269,14 @@ def test_window_names_expire_but_the_timesheet_stays(tmp_path):
     store = Store(tmp_path)
     store.save_config({"source": "synla", "projects": {"Budget": {"keywords": ["budget"]}}})
     start = datetime.now().astimezone().replace(hour=9, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    record(store, [EXCEL] * 120, start)                                   # ten minutes of Excel yesterday
+    play(store, [EXCEL] * 120, start)                                   # ten minutes of Excel yesterday
     a = Synla(store)
     d = start.date()
     for b in a.day(d):
         a.answer_block(d, b.id, "Budget", "project")
     minutes = sum(b.minutes for b in a.day(d))
     recorder.prune(store, 0)                                              # window names deleted
+    a.reload()
     after = a.day(d)
     assert after and all(b.confirmed and b.main.title == DELETED for b in after)
     assert abs(sum(b.minutes for b in after) - minutes) < 0.1
@@ -345,3 +348,158 @@ def test_other_websites_cannot_change_anything(app, server):
     with pytest.raises(urllib.error.HTTPError) as e:
         LOCAL.open(req)
     assert e.value.code == 403
+
+
+# ---- workload ------------------------------------------------------------------------------------------------------
+def test_workload_on_the_demo_week(app):
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    w = app.workload(MONDAY.date())
+    levels = {r["key"]: r["level"] for r in w["rows"]}
+    assert levels["longDays"] == 2              # Monday and Thursday run into the evening
+    assert levels["focus"] == 1 and levels["unplanned"] == 0
+    assert w["level"] == "yellow"
+
+
+def test_your_own_limits_win(app):
+    c = app.store.config()
+    c["indicators"] = {"longDays": [5, 6]}
+    app.store.save_config(c)
+    app.reload()
+    levels = {r["key"]: r["level"] for r in app.workload(MONDAY.date())["rows"]}
+    assert levels["longDays"] == 0
+
+
+# ---- record book ---------------------------------------------------------------------------------------------------
+def test_a_sealed_week_checks_out_and_tampering_shows(app):
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    s = app.seal(MONDAY.date())
+    assert s["version"] == 1 and app.record.verify()["ok"]
+    assert s["data"]["unconfirmedHours"] == 0 and "Window" not in s["statement"]
+    db = __import__("sqlite3").connect(app.store.dir / "record.db")
+    with db:
+        db.execute("UPDATE seals SET statement = replace(statement, '\"totalHours\":40.5', '\"totalHours\":30.5')")
+    db.close()
+    v = app.record.verify()
+    assert not v["ok"] and "changed after it was sealed" in v["problems"][0]
+
+
+def test_a_change_after_sealing_becomes_a_new_version(app):
+    d = MONDAY.date()
+    answer_all(app, d)
+    app.seal(d)
+    assert app.week_status(d)["state"] == "sealed"
+    b = app.day(d)[0]
+    app.answer_block(d, b.id, "Internal", "firefighting")
+    assert app.week_status(d)["state"] == "changed"
+    assert app.seal(d)["version"] == 2
+    assert [s["version"] for s in app.record.seals(d)] == [1, 2] and app.record.verify()["ok"]
+
+
+def test_unchecked_guesses_are_marked_in_the_record(app):
+    s = app.seal(MONDAY.date())
+    by = {x["by"] for day in s["data"]["days"] for x in day["stretches"]}
+    assert "guess" in by and s["data"]["unconfirmedHours"] > 0
+
+
+def test_weeks_are_sealed_automatically_a_week_after_they_end(app):
+    assert app.auto_seal(today=(MONDAY + timedelta(days=12)).date()) == []      # ended only 6 days ago
+    assert app.auto_seal(today=(MONDAY + timedelta(days=15)).date()) == [MONDAY.date()]
+    assert app.record.latest(MONDAY.date())["data"]["sealedBy"] == "auto"
+    assert app.auto_seal(today=(MONDAY + timedelta(days=15)).date()) == []      # only once
+
+
+def test_an_old_week_comes_from_the_record_book(app, tmp_path):
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    sealed = app.seal(MONDAY.date())["data"]
+    app.store.forget(keep_days=-1)                           # answers gone
+    (tmp_path / "empty.json").write_text('{"window": [], "afk": []}')
+    c = app.store.config()
+    c["source"] = str(tmp_path / "empty.json")               # window names gone
+    app.store.save_config(c)
+    app.reload()
+    status = app.week_status(MONDAY.date())
+    assert status["state"] == "sealed" and not status["live"]
+    row = next(r for r in app.year(2026) if r["monday"] == MONDAY.date())
+    assert row["hours"] == sealed["totalHours"] and row["status"] == "sealed"
+
+
+def test_old_records_are_deleted_and_the_chain_still_checks(tmp_path):
+    book = record.RecordBook(Store(tmp_path))
+    for week in ("2018-01-01", "2018-01-08", "2026-11-02"):
+        book.seal({"record": record.FORMAT, "week": week, "days": [], "totalHours": 1.0})
+    book.prune(years=5)
+    assert [s["week"] for s in book.seals()] == ["2026-11-02"] and book.verify()["ok"]
+    book.seal({"record": record.FORMAT, "week": "2026-11-09", "days": [], "totalHours": 1.0})
+    assert book.verify()["ok"]
+
+
+def test_verify_finds_a_fingerprint_and_checks_a_downloaded_record(app, tmp_path, capsys):
+    s = app.seal(MONDAY.date())
+    verify(app.store, s["fingerprint"][:12])
+    out = capsys.readouterr().out
+    assert "checks out" in out and f"week of {MONDAY.date()}" in out
+    doc = {"fingerprint": s["fingerprint"], "previous": s["prev"], "record": s["data"]}
+    (tmp_path / "rec.json").write_text(json.dumps(doc), encoding="utf-8")
+    verify(app.store, str(tmp_path / "rec.json"))
+    assert "matches its fingerprint" in capsys.readouterr().out
+    doc["record"]["totalHours"] = 99
+    (tmp_path / "rec.json").write_text(json.dumps(doc), encoding="utf-8")
+    verify(app.store, str(tmp_path / "rec.json"))
+    assert "does NOT match" in capsys.readouterr().out
+
+
+def test_the_email_to_yourself(app):
+    s = app.seal(MONDAY.date())
+    subject, body = record.email_text(s)
+    assert "week of 02 November 2026" in subject and s["fingerprint"] in body and "Total" in body
+    assert record.mailto("me@example.com", s).startswith("mailto:me@example.com?subject=")
+
+
+# ---- time away from the computer -----------------------------------------------------------------------------------
+def test_time_away_from_the_computer(app):
+    d = MONDAY.date()
+    app.add_time(d, "08:05", "08:20", "Internal", "meeting")
+    bl = app.day(d)
+    added = [b for b in bl if b.main.app == MANUAL_APP]
+    assert len(added) == 1 and added[0].confirmed and round(added[0].minutes) == 15
+    start, end = added[0].start, added[0].end
+    assert not any(s.start < end and start < s.end for b in bl if b.main.app != MANUAL_APP for s in b.segments)
+    with pytest.raises(ValueError):
+        app.add_time(d, "08:10", "08:30", "Internal", "meeting")
+    st = app.statement(d)
+    assert any(x["by"] == "added" for day in st["days"] for x in day["stretches"])
+    app.remove_time(added[0].segments[0].id)
+    assert not any(b.main.app == MANUAL_APP for b in app.day(d))
+
+
+def test_record_pages_over_http(app, server):
+    base, _ = server
+    ok = {"Content-Type": "application/json", "X-Synla-Token": "secret-token"}
+    assert post(f"{base}/api/time", {"date": str(MONDAY.date()), "start": "06:00", "end": "07:00",
+                                      "project": "Internal", "kind": "admin"}, ok) == 200
+    assert post(f"{base}/api/time", {"date": str(MONDAY.date()), "start": "07:00", "end": "06:00",
+                                      "project": "Internal", "kind": "admin"}, ok) == 400
+    assert post(f"{base}/api/seal", {"week": str(MONDAY.date())}, ok) == 200
+    assert post(f"{base}/api/settings", {"recordEmail": "not an email"}, ok) == 400
+    assert post(f"{base}/api/settings", {"recordEmail": "me@example.com"}, ok) == 200
+    week = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    assert "Workload this week" in week and "Fingerprint" in week and "mailto:me@example.com" in week
+    assert "The record checks out" in LOCAL.open(f"{base}/record").read().decode()
+    assert "Year report" in LOCAL.open(f"{base}/year?y=2026").read().decode()
+    seq = app.record.seals()[0]["seq"]
+    doc = json.loads(LOCAL.open(f"{base}/record/statement.json?seq={seq}").read().decode())
+    assert record.fingerprint(doc["previous"], record.canonical(doc["record"])) == doc["fingerprint"]
+    assert LOCAL.open(f"{base}/year.csv?y=2026").read().decode().startswith("week,monday,hours")
+
+
+def test_outside_hours_count_only_the_part_outside_the_working_day():
+    from datetime import time as t
+    from synla.model import Segment
+    start = MONDAY.replace(hour=6, minute=30)
+    seg = Segment(start, start + timedelta(hours=1), "a", "x")
+    assert round(report.outside_minutes(seg, t(7, 0), t(17, 0))) == 30
+    sunday = (MONDAY - timedelta(days=1)).replace(hour=10)
+    assert round(report.outside_minutes(Segment(sunday, sunday + timedelta(hours=1), "a", "x"), t(7, 0), t(17, 0))) == 60
