@@ -2,7 +2,7 @@
 import re
 from datetime import datetime, timedelta
 
-from .model import Block, Guess, Segment
+from .model import MANUAL_APP, Block, Guess, Segment
 
 MERGE_GAP = timedelta(seconds=60)    # same window again within a minute: same segment
 BLOCK_GAP = timedelta(minutes=5)     # same guess again within five minutes: same block
@@ -100,7 +100,8 @@ def blocks(segs: list, classifier, decisions: dict | None = None) -> list:
         else:
             g, confirmed = classifier.guess(seg.app, seg.title, seg.call), False
         last = out[-1] if out else None
-        same = last and (last.guess.project, last.guess.kind) == (g.project, g.kind) and last.confirmed == confirmed
+        same = last and (last.guess.project, last.guess.kind) == (g.project, g.kind) and last.confirmed == confirmed \
+            and (last.main.app == MANUAL_APP) == (seg.app == MANUAL_APP)     # time you added stays its own block
         close = last and seg.start - last.end <= BLOCK_GAP
         noise = last and close and not confirmed and not last.confirmed and seg.minutes < NOISE and g.confidence < 0.7
         if last and close and (same or noise):

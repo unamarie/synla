@@ -7,23 +7,25 @@
   python -m synla week            print this week's summary
   python -m synla export          write this week's timesheet as CSV
   python -m synla demo            try it with a made-up week, kept in its own folder
+  python -m synla seal            seal last week in the record book (--date for another week)
+  python -m synla verify          check the record book; add a fingerprint or a downloaded record to check that
 """
 import argparse
 import sys
-from datetime import date
+from datetime import date, timedelta
 
-from . import demo, report
+from . import demo, record, report
 from .app import Synla
 from .server import csv_text, serve
 from .store import Store
 
-COMMANDS = ["review", "record", "autostart", "pause", "resume", "week", "export", "demo"]
+COMMANDS = ["review", "record", "autostart", "pause", "resume", "week", "export", "demo", "seal", "verify"]
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="synla", description="Logs your hours and shows where the unplanned work goes.")
     ap.add_argument("command", nargs="?", default="review", choices=COMMANDS)
-    ap.add_argument("value", nargs="?", help="on/off for autostart, minutes for pause")
+    ap.add_argument("value", nargs="?", help="on/off for autostart, minutes for pause, a fingerprint or file for verify")
     ap.add_argument("--date", type=date.fromisoformat, help="any day in the week you want (YYYY-MM-DD)")
     ap.add_argument("--port", type=int, default=5700)
     ap.add_argument("--out", help="file for export (default: timesheet-<date>.csv)")
@@ -72,7 +74,16 @@ def main(argv=None):
         print(f"Recording paused for {minutes:g} minutes." if minutes else "Recording resumed.")
         return
 
+    if a.command == "verify":
+        return verify(store, a.value)
+
     app = Synla(store)
+    if a.command == "seal":
+        d = a.date or (date.today() - timedelta(days=7))
+        monday = d - timedelta(days=d.weekday())
+        s = app.seal(monday)
+        print(f"Sealed the week of {monday:%d %B %Y}, version {s['version']}.\nFingerprint: {s['fingerprint']}")
+        return
     app.forget_old()
     d = a.date or date.today()
     if a.command == "review":
@@ -84,6 +95,34 @@ def main(argv=None):
         with open(out, "w", encoding="utf-8", newline="") as f:
             f.write(csv_text(app, d))
         print("wrote", out)
+
+
+def verify(store, value=None):
+    """Checks the whole record book, and optionally one fingerprint or one downloaded record file."""
+    import json
+    import os
+    book = record.RecordBook(store)
+    v = book.verify()
+    if v["ok"]:
+        print(f"The record book checks out: {v['seals']} sealed records, none changed after sealing.")
+    else:
+        print("The record book does NOT check out:")
+        for p in v["problems"]:
+            print("  " + p)
+    if not value:
+        return
+    if os.path.exists(value):
+        doc = json.loads(open(value, encoding="utf-8").read())
+        fp = record.fingerprint(doc["previous"], record.canonical(doc["record"]))
+        ok = fp == doc["fingerprint"]
+        print(f"{value}: {'the record matches its fingerprint' if ok else 'the record does NOT match its fingerprint'}.")
+        value = doc["fingerprint"] if ok else None
+    if value:
+        hits = [s for s in book.seals() if s["fingerprint"].startswith(value.strip().lower())] if len(value.strip()) >= 8 else []
+        for s in hits:
+            print(f"Fingerprint found: week of {s['week']}, version {s['version']}, sealed {s['sealedAt']}.")
+        if not hits:
+            print("That fingerprint is not in this record book.")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,17 @@ def _hm(s: str) -> time:
     return time(int(h), int(m))
 
 
+def outside_minutes(seg, ws: time, we: time) -> float:
+    """Minutes of a stretch that fall outside the working day; all of it on a weekend."""
+    if seg.start.weekday() >= 5:
+        return seg.minutes
+    tz = seg.start.tzinfo
+    w0 = datetime.combine(seg.start.date(), ws, tz)
+    w1 = datetime.combine(seg.start.date(), we, tz)
+    inside = max(0.0, (min(seg.end, w1) - max(seg.start, w0)).total_seconds() / 60)
+    return max(0.0, seg.minutes - inside)
+
+
 def timesheet(days: dict, round_minutes: int = 15) -> dict:
     """days: {date: [blocks]} -> {date: {project: hours}}, rounded to the nearest quarter hour per project."""
     out = {}
@@ -50,7 +61,7 @@ def summary(days: dict, workday=("07:00", "17:00")) -> dict:
     unsure = 0
     per_day = {}
     for day, bl in sorted(days.items()):
-        day_inv = day_total = 0.0
+        day_inv = day_total = day_after = 0.0
         prev_key = None
         for b in bl:
             m = b.minutes
@@ -66,14 +77,15 @@ def summary(days: dict, workday=("07:00", "17:00")) -> dict:
             if b.guess.kind == "project" and m >= FOCUS_MIN:
                 focus.append(m)
             for s in b.segments:
-                weekend = s.start.weekday() >= 5
-                if weekend or s.start.time() < ws or s.start.time() >= we:
-                    after += s.minutes
+                outside = outside_minutes(s, ws, we)
+                after += outside
+                day_after += outside
                 if s.minutes >= 0.5:
                     if prev_key is not None and s.key != prev_key:
                         switches += 1
                     prev_key = s.key
-        per_day[day] = {"hours": day_total / 60, "invisible_share": day_inv / day_total if day_total else 0}
+        per_day[day] = {"hours": day_total / 60, "invisible_share": day_inv / day_total if day_total else 0,
+                        "after": day_after / 60}
 
     hours = total / 60
     inv = sum(by_kind[k] for k in INVISIBLE)

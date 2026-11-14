@@ -25,8 +25,50 @@ employer could use to monitor anyone.
 - **Makes unplanned work visible.** The weekly summary shows how much time went to helping, firefighting, chasing and
   fixing data, where it came from, and how much happened outside working hours.
 - **Produces the timesheet.** Hours per project and day, rounded to 15 minutes, exported as CSV.
+- **Counts time away from the computer.** Add a site visit, a meeting in person or a phone call: from, to, project and
+  kind of work. No notes are stored.
+- **Watches your workload before it gets too much.** Seven leading indicators (unplanned work, focus time, switches,
+  hours outside the working day, days without a break, long days, meetings), each green, yellow or red, and a level
+  for the week with the trend over the last eight weeks.
+- **Keeps a record book.** Each week is sealed with a fingerprint and kept for years, so you can show what you did
+  long after the details are gone. See below.
 
 ![Week summary](docs/week.png)
+
+## Workload indicators
+
+The same idea as a risk model in safety work: instead of counting the bad weeks afterwards, watch the conditions that
+come before them. Each indicator is green, yellow or red. The week is red when two indicators are red or the score
+reaches 6 (green 0, yellow 1, red 2 points), and yellow when one is red or the score reaches 3.
+
+The limits are starting points. After a few weeks of your own data, set your own under `"indicators"` in
+`config.json`, for example `"switches": [20, 40]` for yellow from 20 and red from 40.
+
+## Record book
+
+For when you need to show what you did, long after it happened: overtime that never got registered, a workload
+conversation, a dispute.
+
+![Record book](docs/record-book.png)
+
+- **What a record holds.** For each day of the week: the stretches of time with start, end, project, kind of work and
+  who decided it (you, time you added, or Synla's guess you never checked), plus totals and the workload numbers.
+  No window names, so nothing about colleagues or customers is kept for years.
+- **Sealed.** Each record gets a fingerprint (SHA-256) made from the record and the fingerprint before it. The records
+  form a chain, so changing an old record afterwards breaks it, and `python -m synla verify` shows where.
+- **Corrections stay visible.** You can still correct a sealed week. Sealing it again adds version 2; version 1 stays.
+- **Nothing is lost.** Weeks you don't seal yourself are sealed automatically a week after they end, as they stand.
+- **An outside timestamp.** The chain lives on your computer, so on its own it cannot rule out that someone rebuilt it.
+  So each week Synla prepares an email with the week's fingerprint for you to send to your private address. The
+  email's date is kept by your email provider, outside Synla and outside your employer. A rebuilt chain cannot match
+  fingerprints you emailed months ago.
+- **Year report.** Hours per week, hours above your normal week (37.5 by default), hours outside the working day,
+  unplanned work and workload level, with the fingerprint for each week. Print it, save it as PDF or export CSV.
+- **Kept for 5 years** by default (`keepRecordYears`).
+
+This is your own record, not the official one. Your employer keeps the official record of working hours. A record made
+at the time, never changed afterwards and timestamped outside your own computer carries more weight than memory, but
+how much it counts in a dispute is for your union representative or a lawyer to judge. This is not legal advice.
 
 ## Built for the employee
 
@@ -49,6 +91,7 @@ with no name. You choose the list in `config.json`. You can pause recording at a
 - What Synla learns is stored as one-way codes, never as readable file names or email subjects.
 - Window names are deleted after 30 days. After that only the project, the kind of work and the time remain, so your
   timesheet stays while the details about colleagues and customers are gone. Answers and the log go after 90 days.
+  The record book keeps sealed weeks, with no window names, for 5 years.
 - The **Your data** page shows everything that is stored, and deletes all of it with one click.
 
 **The review page is closed to other websites.** It only answers on 127.0.0.1 and only accepts changes that carry a
@@ -96,8 +139,9 @@ python -m synla demo
    ```
 
 3. At the end of the day, run `python -m synla`. Answer the biggest unsorted windows first, then the orange blocks,
-   then click **Approve the sure ones**.
-4. On Friday, open **Week summary** and use **Timesheet CSV**.
+   then click **Approve the sure ones**. Add any time away from the computer at the bottom of the day.
+4. On Friday, open **Week summary**: check the workload, use **Timesheet CSV**, then **Seal this week** and
+   **Send to yourself**. Add your private email once, on the **Record book** page.
 
 | Command | What it does |
 |---|---|
@@ -107,6 +151,8 @@ python -m synla demo
 | `python -m synla pause 60` | Pauses recording for 60 minutes; `resume` starts it again |
 | `python -m synla week` | Prints this week's summary as text |
 | `python -m synla export --date 2026-11-02` | Writes that week's timesheet as CSV |
+| `python -m synla seal` | Seals last week in the record book; `--date` for another week |
+| `python -m synla verify` | Checks the whole record book; add a fingerprint or a downloaded record to check that one |
 | `python -m synla demo` | Tries Synla with a made-up week |
 
 ## How it decides
@@ -125,9 +171,8 @@ Run the tests with `python -m pytest`. They run on Linux and Windows on every pu
 
 ## Next
 
-- Workload indicators: share of unplanned work, switches, focus time and after-hours work, scored green, yellow or
-  red per week, with the trend over months.
 - Planned vs actual: compare against a calendar export.
 - Rules you can see and edit: "files in this folder belong to this project".
+- Warnings during the week, when an indicator turns red, not only in the week summary.
 
 Built by [Una Marie S. Goksøyr](https://unadata.dev). Code under the MIT licence.

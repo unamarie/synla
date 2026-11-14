@@ -21,6 +21,10 @@ DEFAULT_CONFIG = {
     "roundMinutes": 15,
     "keepDays": 90,            # your answers and the answer log
     "keepWindowDays": 30,      # window names; after this only project, kind and time remain
+    "keepRecordYears": 5,      # the record book: sealed weeks with times, projects and kinds, no window names
+    "weeklyHours": 37.5,       # your normal week, to show hours above it
+    "recordEmail": "",         # your private address, for sending each week's fingerprint to yourself
+    "indicators": {},          # your own yellow and red limits, e.g. {"switches": [20, 40]}
     "source": "auto",          # auto, synla, activitywatch, or a path to a JSON file (the demo)
     "activityWatchUrl": "http://localhost:5600",
     "idleMinutes": 3,          # no keyboard or mouse for this long counts as away, unless you are in a call
@@ -123,6 +127,13 @@ class Store:
             return []
         return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
 
+    # manual.json: time away from the computer that you added yourself (start, end, project, kind; no notes)
+    def manual(self) -> list:
+        return self._read("manual.json", [])
+
+    def save_manual(self, entries: list):
+        self._write("manual.json", sorted(entries, key=lambda e: e["start"]))
+
     # pause.json: when recording is paused until
     def paused_until(self) -> datetime | None:
         v = self._read("pause.json", {}).get("until")
@@ -141,6 +152,10 @@ class Store:
         keep = {k: v for k, v in d.items() if datetime.fromisoformat(k) >= cutoff}
         if len(keep) != len(d):
             self.save_decisions(keep)
+        m = self.manual()
+        recent_manual = [e for e in m if datetime.fromisoformat(e["start"]) >= cutoff]
+        if len(recent_manual) != len(m):
+            self.save_manual(recent_manual)
         log = self.corrections()
         recent = [e for e in log if datetime.fromisoformat(e["at"]) >= cutoff]
         if len(recent) != len(log):
@@ -148,10 +163,13 @@ class Store:
             tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in recent), encoding="utf-8")
             os.replace(tmp, self.dir / "corrections.jsonl")
 
-    def delete_everything(self):
-        """Removes all of Synla's data. Your settings (config.json) stay, so you can start again."""
-        for name in ("decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json",
-                     "activity.db", "activity.db-wal", "activity.db-shm"):
+    def delete_everything(self, record_book: bool = False):
+        """Removes Synla's data. The record book only when asked. Your settings (config.json) stay."""
+        names = ["decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json", "manual.json",
+                 "activity.db", "activity.db-wal", "activity.db-shm"]
+        if record_book:
+            names += ["record.db", "record.db-wal", "record.db-shm"]
+        for name in names:
             try:
                 (self.dir / name).unlink()
             except FileNotFoundError:

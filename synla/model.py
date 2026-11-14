@@ -14,6 +14,8 @@ KINDS = {
 }
 INVISIBLE = ("helping", "firefighting", "chasing", "datafixing")
 UNKNOWN = "?"
+MANUAL_APP = "Added by you"              # time away from the computer that you added yourself
+MANUAL_TITLE = "Away from the computer"
 
 
 @dataclass
