@@ -23,6 +23,13 @@ class Segment:
     end: datetime
     app: str
     title: str
+    call: bool = False           # a microphone was in use, or the window looks like a call
+
+    @property
+    def id(self) -> str:
+        """Stable name for this stretch: its start in UTC. Answers are saved under it."""
+        from .store import utc_key
+        return utc_key(self.start)
 
     @property
     def minutes(self) -> float:

@@ -33,9 +33,13 @@ def strip_app(title: str) -> str:
     return t.strip()
 
 
-def features(app: str, title: str) -> list:
+def features(app: str, title: str, call: bool = False) -> list:
     """Return a list of 'type:value' strings. The same input always gives the same list."""
-    out = []
+    return list(dict.fromkeys(_features(app, title, call)))
+
+
+def _features(app: str, title: str, call: bool) -> list:
+    out = ["is:meeting"] if call else []
     a = norm(app).removesuffix(".exe")
     if a:
         out.append(f"app:{a}")
