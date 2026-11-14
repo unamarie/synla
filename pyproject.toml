@@ -1,0 +1,23 @@
+[project]
+name = "synla"
+version = "0.1.0"
+description = "Logs your hours from what you actually did, and makes the unplanned work visible. Runs only on your own computer."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+synla = "synla.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["synla"]
+
+[tool.pytest.ini_options]
+python_files = ["test*.py"]
+testpaths = ["tests"]
