@@ -20,10 +20,11 @@ from .context import features
 from .model import Guess, UNKNOWN
 
 # How much a feature type is worth. A file name or an email subject is a strong clue; the app name is weak.
-TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "folder": 2.5, "is": 1.5, "word": 1.0, "app": 0.6, "ext": 0.3}
+TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "id": 3.0, "folder": 2.5, "is": 1.5, "word": 1.0, "app": 0.6,
+               "ext": 0.3}
 # How many answers a clue needs before it is trusted. The very same window again is trusted after one answer, so
 # Synla does not ask about it twice; a word needs a few.
-TRUST = {"win": 0.5}
+TRUST = {"win": 0.5, "id": 1.0}
 
 # Built-in clues for the kind of work. Learning from the user can override any of these.
 KIND_RULES = {
@@ -107,7 +108,7 @@ class Classifier:
                     why[label].append((v, f))
             if target == "project":
                 val = f.split(":", 1)[1] if ":" in f else f
-                if f.split(":", 1)[0] in ("file", "subject", "folder", "word"):
+                if f.split(":", 1)[0] in ("file", "subject", "folder", "word", "id"):
                     for p, kws in self.project_keywords.items():
                         if any(k in val for k in kws):
                             votes[p] += RULE_WEIGHT
@@ -156,4 +157,5 @@ def explain(f: str) -> str:
     if rule:
         return f'keyword in "{val[:30]}"'
     return {"win": "same window as before", "file": f"file {val[:30]}", "subject": "same email thread",
-            "folder": f"folder {val[:30]}", "app": f"app {val}", "word": f'word "{val[:30]}"'}.get(kind, f[:30])
+            "folder": f"folder {val[:30]}", "app": f"app {val}", "word": f'word "{val[:30]}"',
+            "id": f'number "{val[:30]}"'}.get(kind, f[:30])

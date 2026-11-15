@@ -1,8 +1,12 @@
 """Turns an app name and window title into features: the clues used to work out what the work was for.
 
 A window title like "Budget 2027.xlsx - Excel" or "RE: Missing delivery report - Outlook" says a lot more than the app
-name alone. We pull out the app, file names, folders, email subjects and plain words, each with a prefix so the
-classifier can weigh them differently ("file:budget 2027" is a much stronger clue than "word:report").
+name alone. We pull out the app, file names, folders, email subjects, numbers and plain words, each with a prefix so
+the classifier can weigh them differently ("file:budget 2027" is a much stronger clue than "word:report").
+
+Numbers matter in ERP, PLM and CRM screens, where the item, order or change number is often the only link to the work:
+"Display Material 4500-1203" gives "id:4500-1203". Years, dates, times, versions and small counts are not numbers in
+that sense and are left out.
 """
 import re
 
@@ -18,6 +22,12 @@ APP_SUFFIX = re.compile(r"\s+[-|\u2013\u2014]\s+(Microsoft\s+)?(Excel|Word|Power
 FILE = re.compile(r"([\w\-. ()\']{2,80}?)\.(xlsx|xlsm|xls|csv|docx|doc|pptx|pdf|py|ipynb|sql|pbix|pbip|json|md|txt|html|js|ts|tmdl)\b", re.I)
 PATH = re.compile(r"(?:[A-Za-z]:\\|/|~/)[^\s|]+")
 EMAIL_SUBJECT = re.compile(r"^(?:(?:re|fw|fwd|sv|vs)\s*:\s*)+(.+)$", re.I)
+# An email opened in its own window: "RE: Seal kit - Message (HTML)", in Norwegian "Melding (HTML)"
+MESSAGE_SUFFIX = re.compile(r"\s+[-\u2013]\s+(Message|Melding)\s+\((HTML|Plain Text|Rich Text|ren tekst|rik tekst)\)$", re.I)
+EMAIL_ADDRESS = re.compile(r"\S+@\S+")
+TOKEN = re.compile(r"[0-9A-Za-zÆØÅæøå][0-9A-Za-zÆØÅæøå\-./_]*")
+NOT_ID = re.compile(r"(19|20)\d\d|\d{4}-\d\d?-\d\d?|\d\d?[./]\d\d?([./]\d{2,4})?|\d+[.,]\d{1,2}|(v|rev|ver)\.?\d+(\.\d+)*")
+LETTERS_THEN_NUMBER = re.compile(r"[a-zæøå]{1,6}[-_/.]?\d[\d\-./_]*[a-zæøå]{0,3}")
 EXTS = set("xlsx xlsm xls csv docx doc pptx pdf py ipynb sql pbix pbip json md txt html js ts tmdl".split())
 WORD = re.compile(r"[A-Za-zÆØÅæøå][A-Za-zÆØÅæøå0-9_]{2,}")
 
@@ -29,8 +39,25 @@ def norm(s: str) -> str:
 def strip_app(title: str) -> str:
     t = title
     for _ in range(2):            # "Chat | Sales team | Microsoft Teams" has two suffixes
-        t = APP_SUFFIX.sub("", t)
+        t = MESSAGE_SUFFIX.sub("", APP_SUFFIX.sub("", t))
     return t.strip()
+
+
+def numbers(t: str) -> list:
+    """Item, order, change and document numbers in a title: 4500-1203, ECR-2026-0153, 5523019, P-45."""
+    out = []
+    for tok in TOKEN.findall(EMAIL_ADDRESS.sub(" ", t)):
+        tok = tok.strip("-./_").lower()
+        digits = sum(c.isdigit() for c in tok)
+        if not digits or len(tok) > 30 or NOT_ID.fullmatch(tok):
+            continue
+        if tok[0].isalpha():
+            ok = digits >= 2 and LETTERS_THEN_NUMBER.fullmatch(tok)
+        else:
+            ok = digits >= 4 if tok.isdigit() else digits >= 3
+        if ok and tok not in out:
+            out.append(tok)
+    return out
 
 
 def features(app: str, title: str, call: bool = False) -> list:
@@ -77,6 +104,9 @@ def _features(app: str, title: str, call: bool) -> list:
         out.append("is:urgent")
     if re.search(r"\?\s*$|\b(where is|any update|status on|waiting for|reminder|purring|påminnelse)\b", t, re.I):
         out.append("is:asking")
+
+    for n in numbers(t):
+        out.append(f"id:{n}")
 
     seen = set()
     for w in WORD.findall(t):

@@ -19,6 +19,9 @@ AUTO_SEAL_AFTER = 7      # days after a week ends, an unsealed week is sealed as
 CACHE_SECONDS = 20       # a page asks for the same days several times; read them once
 QUESTIONS_PER_DAY = 5    # Synla asks about at most this many windows a day, unless you ask for more
 ASK_MIN = 5.0            # minutes; smaller unsure windows keep Synla's best guess instead of becoming a question
+GAP_MIN = 30.0           # minutes away from the computer inside your workday before Synla asks what it was
+LUNCH = (time(10, 30), time(13, 0), 45.0)   # away starting in this window and no longer than this: a break, not asked
+LIKE_BREAK = 30          # minutes: away starting this close to two earlier "Not work" answers is not asked either
 
 
 class Synla:
@@ -85,6 +88,10 @@ class Synla:
         start, end = day_range(d)
         win, afk = self.source.events(start, end)
         segs = segments(win, afk)
+        paused = [(a.astimezone(), b.astimezone(), None) for a, b in self.store.pauses() if a < end and start < b]
+        if paused:                        # paused means paused, also when another program kept recording
+            segs = [Segment(a, b, s.app, s.title, s.call) for s in segs for a, b in _subtract(s.start, s.end, paused)
+                    if (b - a).total_seconds() >= 1]
         decisions = dict(self.store.decisions())
         added = self._manual(start, end)
         if added:                         # time you added wins over whatever the computer recorded then
@@ -174,11 +181,88 @@ class Synla:
             code = self.window_code(w["key"])
             if code in skipped:
                 continue
-            items.append(dict(w, code=code, guess=self.classifier.guess(w["app"], w["title"], w["call"])))
+            items.append(dict(w, type="window", size=w["unsure"], code=code,
+                              guess=self.classifier.guess(w["app"], w["title"], w["call"])))
+        items += [dict(g, size=g["minutes"]) for g in self.gaps(d) if g["code"] not in skipped]
+        items.sort(key=lambda it: -it["size"])
         answered = int(state.get("answered", 0))
         room = len(items) if state.get("more") else max(0, QUESTIONS_PER_DAY - answered)
         return {"items": items[:room], "waiting": max(0, len(items) - room), "answered": answered,
                 "skipped": len(skipped)}
+
+    # ---- time away from the computer -------------------------------------------------------------------------
+    def gaps(self, d: date) -> list:
+        """Time away worth asking about: 30 minutes or more on a weekday, starting and ending inside your workday, so
+        Synla never asks about mornings, evenings or leaving early. Never paused time, never a likely break, never days
+        before this version, never when turned off. "Not work" is always an answer, and Synla never asks why."""
+        if not self.config.get("askAboutGaps", True) or d.weekday() >= 5:
+            return []
+        if self.config.get("source", "auto") in ("auto", "synla", "activitywatch") and \
+                d.isoformat() < self.store.gaps_since():
+            return []
+        segs = sorted((s for b in self.day(d) for s in b.segments), key=lambda s: s.start)
+        if len(segs) < 2:
+            return []
+        tz = segs[0].start.tzinfo
+        w0, w1 = (datetime.combine(d, time.fromisoformat(x), tz) for x in self.workday)
+        pauses = self.store.pauses()
+        state = self.store.day_state(d)
+        handled = [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b, _ in state.get("away", [])]
+        out, last = [], segs[0].end
+        for s in segs[1:]:
+            a, b = last, s.start
+            minutes = (b - a).total_seconds() / 60
+            if minutes >= GAP_MIN and w0 <= a and b <= w1 \
+                    and not any(p0 < b and a < p1 for p0, p1 in pauses) \
+                    and not any(h0 < b and a < h1 for h0, h1 in handled) \
+                    and not self.likely_break(a, minutes):
+                out.append({"type": "gap", "start": a, "end": b, "minutes": minutes, "code": "gap:" + utc_key(a)})
+            last = max(last, s.end)
+        return out
+
+    def likely_break(self, start: datetime, minutes: float) -> bool:
+        """Lunch, or a break like ones you already called "Not work" twice."""
+        t = start.astimezone().time()
+        if LUNCH[0] <= t <= LUNCH[1] and minutes <= LUNCH[2]:
+            return True
+        at = t.hour * 60 + t.minute
+        alike = 0
+        for state in self.store.days().values():
+            for a, b, what in state.get("away", []):
+                if what != "break":
+                    continue
+                s0, s1 = datetime.fromisoformat(a).astimezone(), datetime.fromisoformat(b).astimezone()
+                if abs(s0.hour * 60 + s0.minute - at) <= LIKE_BREAK and minutes <= (s1 - s0).total_seconds() / 60 + 15:
+                    alike += 1
+        return alike >= 2
+
+    def _open_gap(self, d: date, code: str) -> dict:
+        g = next((g for g in self.gaps(d) if g["code"] == code), None)
+        if not g:
+            raise ValueError("That time away has already been answered.")
+        return g
+
+    def _away(self, d: date, g: dict, what: str):
+        state = self.store.day_state(d)
+        state.setdefault("away", []).append([utc_key(g["start"]), utc_key(g["end"]), what])
+        state["answered"] = int(state.get("answered", 0)) + 1
+        self.store.save_day_state(d, state)
+
+    def answer_gap(self, d: date, code: str, start_hm: str, end_hm: str, project: str, kind: str) -> str:
+        """It was work: the time is added like any time away from the computer. You can shorten it first."""
+        g = self._open_gap(d, code)
+        snap = self._snapshot()
+        start = self.add_time(d, start_hm, end_hm, project, kind)
+        self._away(d, g, "work")
+        self._done(snap)
+        return start
+
+    def gap_not_work(self, d: date, code: str):
+        """Not work. Only the time is kept, so Synla can stop asking about breaks like it."""
+        g = self._open_gap(d, code)
+        snap = self._snapshot()
+        self._away(d, g, "break")
+        self._done(snap)
 
     def skip(self, d: date, code: str):
         """Not now: this window keeps Synla's best guess and is not asked about again this day."""
@@ -239,7 +323,7 @@ class Synla:
     # ---- undo ------------------------------------------------------------------------------------------------
     def _snapshot(self) -> dict:
         return {"decisions": self.store.decisions(), "memory": self.store.memory(),
-                "log": len(self.store.corrections()), "days": self.store.days()}
+                "log": len(self.store.corrections()), "days": self.store.days(), "manual": self.store.manual()}
 
     def _done(self, snap: dict):
         self.last_undo = secrets.token_hex(8)
@@ -255,6 +339,7 @@ class Synla:
         self.store.save_memory({k: v for k, v in snap["memory"].items() if k != "version"})
         self.store.truncate_log(snap["log"])
         self.store.save_days(snap["days"])
+        self.store.save_manual(snap["manual"])
         self.reload()
 
     def _apply(self, d: date, groups: list, how: str) -> int:
@@ -485,6 +570,9 @@ class Synla:
             "answers_first": min((datetime.fromisoformat(k) for k in dec), default=None),
             "log_entries": len(self.store.corrections()),
             "added": len(self.store.manual()),
+            "away": sum(len(v.get("away", [])) for v in self.store.days().values()),
+            "pauses": len(self.store.pauses()),
+            "askAboutGaps": bool(self.config.get("askAboutGaps", True)),
             "clues": sum(len(v) for k, v in mem.items() if k in ("project", "kind")),
             "seals": len(seals),
             "seals_first": seals[0]["week"] if seals else None,

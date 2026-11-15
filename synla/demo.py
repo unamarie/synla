@@ -76,11 +76,15 @@ def week(monday: datetime, seed: int = 7) -> dict:
         t = work(t, *ROUTINE[0][:2], rnd.randint(10, 25))
         if d in (0, 2, 4):
             t = work(t, *ROUTINE[2][:2], 15)
-        lunch_done = False
+        lunch_done = met = False
         while t < end:
             if not lunch_done and t.hour * 60 + t.minute >= 11 * 60 + 20:
                 t = idle(t, rnd.randint(25, 35))
                 lunch_done = True
+                continue
+            if d == 3 and not met and t.hour * 60 + t.minute >= 13 * 60 + 30:
+                t = idle(t, 75)                  # a supplier meeting in a room: the laptop stays on the desk
+                met = True
                 continue
             if d == 1 and t.hour == 13 and not any("Weekly status" in e["data"].get("title", "") for e in win[-30:]):
                 t = work(t, *ROUTINE[1][:2], 40)
