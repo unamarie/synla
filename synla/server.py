@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import record, recorder, report, roles, workload
 from .classify import ASK_BELOW
-from .context import outlook_item, strip_app
+from .context import d365, outlook_item, strip_app
 from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN
 
 KEYS = "qwertyui"                         # keys for the kinds of work you see, in order
@@ -101,6 +101,9 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px var(--c)}
 .chip.ghost{color:var(--muted);border-style:dashed;padding-left:14px}
 .gap.isnotwork .kinds{opacity:.35;pointer-events:none}
+.ismeeting{display:inline-flex;align-items:center;gap:9px;font-size:.95rem;cursor:pointer;padding-top:2px}
+.ismeeting input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
+.push{margin:2px 0 12px;padding:10px 14px;border-radius:10px;background:var(--paper);border-left:3px solid var(--sun);font-size:.95rem}
 .chip[hidden]{display:none}.more:not([hidden]){display:contents}
 .find{font:inherit;font-size:.95rem;border:1.5px solid var(--line);border-radius:999px;padding:6px 14px;background:var(--surface);color:var(--ink);width:220px}
 .roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
@@ -221,7 +224,8 @@ function toast(msg,undo){
 function reveal(c){const m=c.closest('.more');if(m&&m.hidden){m.hidden=false;const b=m.nextElementSibling;if(b&&b.matches('[data-showmore]'))b.hidden=true}}
 function direct(card,sel){const g=$(sel,card);return g?$$(':scope > .chip[data-v]:not([data-notwork])',g):[]}
 function pick(c){if(!c)return;reveal(c);$$('.chip[data-v]',c.closest('.chips')).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)});
- const g=c.closest('.gap');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'))}
+ const g=c.closest('.gap');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'));
+ const t=c.closest('.chips.k')&&$('.meeting',c.closest('.ask,.away'));if(t&&c.dataset.v==='travel')t.checked=false}
 function choose(box,sel,v){const c=$$(sel+' .chip[data-v]',box).find(x=>x.dataset.v===v);if(c)pick(c);else $$(sel+' .chip',box).forEach(x=>x.classList.remove('on'))}
 const active=()=>{const e=$('#editor');return e&&!e.hidden?e:$('.ask.q')};
 async function saveGap(card){
@@ -230,10 +234,11 @@ async function saveGap(card){
  const body={date:card.dataset.date,code:card.dataset.code};
  if(p.hasAttribute('data-notwork'))body.notWork=true;
  else{if(!k){toast('Pick a kind of work.');return}
-  Object.assign(body,{project:p.dataset.v,kind:k.dataset.v,start:$('.from',card).value,end:$('.to',card).value})}
+  Object.assign(body,{project:p.dataset.v,kind:k.dataset.v,start:$('.from',card).value,end:$('.to',card).value,
+   meeting:$('.meeting',card).checked})}
  const res=await post('/api/gap',body);if(!res)return;
  await refresh();
- toast(body.notWork?'Saved: not work.':'Saved: '+body.project+', '+k.dataset.label.toLowerCase()+', '+body.start+' to '+body.end+'.',res.undo);
+ toast(body.notWork?'Saved: not work.':'Saved: '+body.project+', '+k.dataset.label.toLowerCase()+(body.meeting?', meeting':'')+', '+body.start+' to '+body.end+'.',res.undo);
 }
 async function save(card){
  if(card.dataset.type==='gap')return saveGap(card);
@@ -281,7 +286,8 @@ async function addTime(box){
  const p=$('.chips.p .chip.on',box),k=$('.chips.k .chip.on',box),from=$('.from',box).value,to=$('.to',box).value;
  if(!from||!to){toast('Fill in from and to.');return}
  if(!p){toast('Pick a '+WORD+'.');return}
- const res=await post('/api/time',{date:box.dataset.date,start:from,end:to,project:p.dataset.v,kind:k?k.dataset.v:''});
+ const res=await post('/api/time',{date:box.dataset.date,start:from,end:to,project:p.dataset.v,kind:k?k.dataset.v:'',
+  meeting:$('.meeting',box).checked});
  if(res){await refresh();toast('Added '+from+' to '+to+'.','time:'+res.id)}
 }
 document.addEventListener('click',async e=>{
@@ -331,6 +337,7 @@ document.addEventListener('keydown',e=>{
  const card=active();if(!card)return;const k=e.key.toLowerCase();
  if(/^[1-9]$/.test(k)){pick(direct(card,'.chips.p')[+k-1]);e.preventDefault();return}
  if(k==='0'){pick($('.chips.p [data-notwork]',card));e.preventDefault();return}
+ if(k==='m'&&$('.meeting',card)){const t=$('.meeting',card);t.checked=!t.checked;e.preventDefault();return}
  const i=k.length===1?'qwertyui'.indexOf(k):-1;
  if(i>=0){pick(direct(card,'.chips.k')[i]);e.preventDefault();return}
  if(e.key==='Enter'&&(e.target===document.body||e.target.closest('.chip'))){e.preventDefault();save(card);return}
@@ -358,8 +365,28 @@ OUTLOOK_SAYS = {"email": "Email in Outlook", "invite": "Meeting invite in Outloo
 
 
 def where(app: str, title: str) -> str:
-    """The app, or what an Outlook window shows: an email, an invite, the calendar."""
-    return OUTLOOK_SAYS.get(outlook_item(app, title), app_name(app))
+    """The app, what an Outlook window shows (an email, an invite, the calendar), or the record in Dynamics 365."""
+    item = outlook_item(app, title)
+    if item:
+        return OUTLOOK_SAYS[item]
+    crm = d365(title)
+    if crm:
+        system = "Finance and Operations" if crm[0] == "fo" else "Dynamics 365"
+        return f"{crm[1]} in {system}" if crm[1] else system
+    return app_name(app)
+
+
+def is_meeting(b) -> bool:
+    """A meeting: mostly a call, or time away you said was a meeting. Synla notes the time, never what was said."""
+    calls = sum(s.minutes for s in b.segments if s.call)
+    return calls > 0 and calls >= b.minutes / 2
+
+
+def day_list(days) -> str:
+    if [d.weekday() for d in days] == [0, 1, 2, 3, 4]:
+        return "every workday"
+    names = [f"{d:%A}" for d in days]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def stretches(spans: list) -> list:
@@ -563,21 +590,23 @@ def ask_card(app, d: date, q: dict) -> str:
     n = len(q["items"])
     known = g.project if g.project in app.projects else ""
     meta = [where(it["app"], it["title"]), when_text(it["spans"])]
-    if it["call"]:
-        meta.append("in a call")
     hint = (f"Synla thinks {escape(known)}{why(g)}." if known
             else "Synla has no guess yet. Your answer teaches it for next time.")
     dots = "".join(f"<i class='{'on' if i == 0 else ''}'></i>" for i in range(min(n, 8)))
     return f"""<section class='ask q' data-date='{d}' data-ids='{ids_attr(it["ids"])}' data-how='window' data-asked='1'
  data-code='{escape(it["code"])}'>
 <div class='askhead'><span>{COUNT.get(n, f"{n} quick questions")}</span><span class='prog'>{dots}</span></div>
-<h2>What was this?</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
+<h2>{"What was this meeting for?" if it["call"] else "What was this?"}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
 <div class='meta'>{escape(" · ".join(meta))}</div>
 <div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known)}</div></div>
 <div class='hint'>{hint}</div>
 <div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, g.kind if g.kind in KINDS else "project")}</div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
 <button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
+
+
+MEETING_TICK = ("<div class='row kinds'><span class='lab'></span><label class='ismeeting'><input type='checkbox' class='meeting' "
+                "checked> It was a meeting <span class='key'>M</span></label></div>")
 
 
 def gap_card(app, d: date, q: dict) -> str:
@@ -593,7 +622,8 @@ def gap_card(app, d: date, q: dict) -> str:
 <div class='meta'>{hm(it["minutes"])} · {a:%H:%M} to {b:%H:%M}</div>
 <div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{notwork}{project_chips(app)}</div></div>
 <div class='hint'>Not work is enough. Synla never asks why, and keeps only the time.</div>
-<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "meeting")}</div></div>
+<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "project")}</div></div>
+{MEETING_TICK}
 <div class='row kinds'><span class='lab'>When</span><div class='times'><input type='time' class='from' value='{a:%H:%M}'
 aria-label='From'> to <input type='time' class='to' value='{b:%H:%M}' aria-label='To'></div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
@@ -648,7 +678,8 @@ def check_section(app, d: date, bl: list) -> str:
             f"<span class='w'><b>{escape(shown(b.main.title, b.main.app))}</b><small>{escape(where(b.main.app, b.main.title))}{more} · "
             f"{hm(b.minutes)}</small></span>"
             f"<span class='pj'><i class='sw {'uns' if who == 'unsure' else ''}' style='background:{color(app, p)}'></i>"
-            f"<span>{escape(p)}<small>{escape(roles.say(app.config, b.guess.kind)) if b.guess.kind in KINDS else ''}</small></span></span>"
+            f"<span>{escape(p)}<small>{escape(roles.say(app.config, b.guess.kind)) if b.guess.kind in KINDS else ''}"
+            f"{' · meeting' if is_meeting(b) and b.guess.kind != 'meeting' else ''}</small></span></span>"
             f"<span class='by {who}'>{tag}</span>{act}</div>")
     guesses = sum(1 for b in bl if not b.confirmed and not unsure(b))
     foot = (f"<div class='foot'><span class='note'>Looks right? This marks Synla's {guesses} guesses as checked by you.</span>"
@@ -663,11 +694,13 @@ def check_section(app, d: date, bl: list) -> str:
 
 def away_section(app, d: date) -> str:
     return f"""<section class='panel away' id='away' data-panel hidden data-date='{d}'><h3>Time away from the computer</h3>
-<p class='note'>A site visit, a meeting in a room, a phone call. Only the time, project and kind are kept, no notes.</p>
+<p class='note'>A meeting in a room, a site visit, a phone call. Only the time, project, kind and if it was a meeting are
+kept, no notes.</p>
 <div class='row'><span class='lab'>When</span><div class='times'><input type='time' class='from' aria-label='From'> to
 <input type='time' class='to' aria-label='To'></div></div>
 <div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, keys=False)}</div></div>
-<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "meeting", keys=False)}</div></div>
+<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "project", keys=False)}</div></div>
+{MEETING_TICK.replace("<span class='key'>M</span>", "")}
 <div class='act'><button type='button' class='save' data-addtime>Add</button></div></section>"""
 
 
@@ -699,6 +732,8 @@ same way, so the workload numbers, the record book and earlier weeks mean the sa
 <h2>Your own words</h2><section class='panel'><p class='note'>Call a kind of work what you call it, for example Error
 handling instead of Firefighting. Leave a box empty to use your role's word.</p><div class='knames'>{names}</div>
 <div class='buttons'><button class='btn' data-savenames>Save</button></div></section>
+<p class='note'>A meeting is not a kind of work. Synla notes that a stretch was a meeting, never what was said, and asks
+what it was for. A meeting about an urgent issue counts as urgent work.</p>
 <p class='note'>Buttons you have not used for four weeks move under More, except planned work and the kinds of unplanned
 work, which are what Synla measures. Projects show the five you use most, and the rest are one search away.</p>"""
     return page(app, "Your role", body, token)
@@ -760,7 +795,8 @@ def week_view(app, monday: date) -> dict | None:
             for b in bl:
                 per[project_of(b)] = per.get(project_of(b), 0.0) + b.minutes / 60
             before, after = _outside(app, [x for b in bl for x in b.segments], d)
-            v["days"][d] = {"hours": sum(per.values()), "projects": per, "early": before >= 15, "late": after >= 15}
+            v["days"][d] = {"hours": sum(per.values()), "projects": per, "early": before >= 15, "late": after >= 15,
+                            "urgent": s["per_day"][d]["urgent"], "pushed": s["per_day"][d]["pushed"]}
             for p, h in per.items():
                 v["projects"][p] = v["projects"].get(p, 0.0) + h
         sunday = monday + timedelta(days=6)
@@ -776,12 +812,17 @@ def week_view(app, monday: date) -> dict | None:
         d = date.fromisoformat(x["date"])
         per = {}
         early = late = False
+        urgent = pushed = 0.0
         for r in x["stretches"]:
             p = NOT_SORTED if r["project"] in ("Unsorted", UNKNOWN) else r["project"]
             per[p] = per.get(p, 0.0) + r["minutes"] / 60
             early = early or r["start"][11:16] < ws
             late = late or r["end"][11:16] > we
-        v["days"][d] = {"hours": x["hours"], "projects": per, "early": early, "late": late}
+            if r.get("kind") == "firefighting":
+                urgent += r["minutes"] / 60
+                pushed += r["minutes"] / 60 * _inside_share(r["start"], r["end"], ws, we)
+        v["days"][d] = {"hours": x["hours"], "projects": per, "early": early, "late": late, "urgent": urgent,
+                        "pushed": pushed}
     v["projects"] = {(NOT_SORTED if p in ("Unsorted", UNKNOWN) else p): h for p, h in st["projects"].items()}
     inv = {k: h for k, h in st.get("kinds", {}).items() if k in INVISIBLE}
     total = st["totalHours"]
@@ -789,6 +830,35 @@ def week_view(app, monday: date) -> dict | None:
              assessed=workload.assess(st.get("workload", {}), app.config),
              top=[(k, roles.say(app.config, k), h, None) for k, h in sorted(inv.items(), key=lambda kv: -kv[1])])
     return v
+
+
+def _inside_share(start: str, end: str, ws: str, we: str) -> float:
+    """How much of a sealed stretch lies inside working hours, by the clock."""
+    a, b = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    w0, w1 = (datetime.combine(a.date(), time.fromisoformat(x), a.tzinfo) for x in (ws, we))
+    span = (b - a).total_seconds()
+    return max(0.0, (min(b, w1) - max(a, w0)).total_seconds()) / span if span > 0 else 0.0
+
+
+def push_note(app, v: dict) -> str:
+    """Urgent work always pushes planned work: how much, on which days, and whether those days ran into the evening."""
+    days = sorted(d for d, x in v["days"].items() if x.get("urgent", 0) >= 0.25)
+    if not days:
+        return ""
+    label = escape(roles.say(app.config, "firefighting"))
+    when = day_list(days)
+    when = when if when.startswith("every") else "on " + when
+    pushed = sum(v["days"][d].get("pushed", 0) for d in days)
+    if pushed < 0.25:
+        hours = sum(v["days"][d]["urgent"] for d in days)
+        return f"<p class='push'><b>{label}: {hours:.1f} h</b> {when}, all outside working hours.</p>"
+    text = f"<b>{label} pushed {pushed:.1f} h of planned work</b> {when}."
+    late = [d for d in days if v["days"][d]["late"]]
+    if late:
+        who = ("The day" if len(days) == 1 else "Both days" if len(late) == len(days) == 2
+               else "All of them" if len(late) == len(days) else day_list(late))
+        text += f" {who[0].upper() + who[1:]} ran into the evening."
+    return f"<p class='push'>{text}</p>"
 
 
 def unplanned_row(app, kind: str, what: str, hours: float, back: dict | None) -> str:
@@ -873,7 +943,7 @@ def week_page(app, d: date, token: str) -> str:
 <div class='weekgrid'>{''.join(cols)}</div>
 <div class='two'><section class='panel'><h3>{roles.word(app.config, True)}</h3>{prow}</section>
 <section class='panel'><h3>Unplanned work <span class='pill'>{v['share']:.0%} · {v['unplanned']:.1f} h</span></h3>
-{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}{more}</section></div>
+{push_note(app, v)}{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}{more}</section></div>
 {record_panel(app, monday, v['status'])}
 <div class='quiet'><a href='/week/timesheet?date={monday}'>Timesheet ›</a><a href='/week/indicators?date={monday}'>All indicators ›</a>
 <a href='/year?y={monday.year}'>Year report ›</a></div>"""
@@ -950,7 +1020,7 @@ two indicators are red or the score reaches 6, and yellow when one is red or the
 "indicators" in config.json.</p>
 <h2>The last 8 weeks</h2><div class='tiles'>{tiles}</div>
 <h2 id='unplanned'>Where the unplanned work came from</h2>
-<section class='panel'>{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}</section>"""
+<section class='panel'>{push_note(app, v)}{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}</section>"""
     return page(app, "Workload", body, token)
 
 
@@ -1083,7 +1153,7 @@ why.</p><div class='buttons'><button class='btn' data-gaps='{0 if i['askAboutGap
 <section class='panel'><h3>What is stored</h3><table><tr><th>What</th><th class='num'>Amount</th><th>Oldest</th><th>Kept for</th></tr>
 <tr><td>Window names and times from the recorder</td><td class='num'>{i['recorder_rows']:,}</td><td class='nw'>{_when(i['recorder_first'])}</td><td>{i['keepWindowDays']} days</td></tr>
 <tr><td>Your answers: project and kind for each stretch of time</td><td class='num'>{i['answers']:,}</td><td class='nw'>{_when(i['answers_first'])}</td><td>{i['keepDays']} days</td></tr>
-<tr><td>Time you added away from the computer (no notes)</td><td class='num'>{i['added']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
+<tr><td>Time you added away from the computer, and if it was a meeting (no notes)</td><td class='num'>{i['added']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Answers about time away: when, and whether it was work. Never why</td><td class='num'>{i['away']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Pauses: when each started and ended, so Synla never asks about them</td><td class='num'>{i['pauses']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Unplanned work by source, as one-way codes, to see what keeps coming back</td><td class='num'>{i['repeats']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
@@ -1227,7 +1297,8 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     else:
                         if not body.get("project") or body.get("kind") not in KINDS:
                             return self._send(400, "Pick a project and a kind of work, or Not work.", "text/plain")
-                        app.answer_gap(d, code, body.get("start", ""), body.get("end", ""), body["project"], body["kind"])
+                        app.answer_gap(d, code, body.get("start", ""), body.get("end", ""), body["project"], body["kind"],
+                                       bool(body.get("meeting")))
                     return self._json({"ok": True, "undo": app.last_undo})
                 if path == "/api/more":
                     app.ask_more(date.fromisoformat(body["date"]))
@@ -1248,7 +1319,7 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     app.store.pause(float(m or 0) or None)
                 elif path == "/api/time":
                     start = app.add_time(date.fromisoformat(body["date"]), body.get("start", ""), body.get("end", ""),
-                                         body.get("project", ""), body.get("kind", ""))
+                                         body.get("project", ""), body.get("kind", ""), bool(body.get("meeting")))
                     return self._json({"ok": True, "id": start})
                 elif path == "/api/time/remove":
                     app.remove_time(body["start"])

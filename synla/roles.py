@@ -1,5 +1,8 @@
 """Roles: the words and the choices that fit your work.
 
+A meeting is not a kind of work. Synla notes that a stretch was a meeting (a call, or time away you call a meeting)
+and asks what it was for: a status meeting about a project is planned work, an escalation call is urgent work.
+
 Underneath, every role uses the same kinds of work, so the workload numbers, the record book and earlier weeks mean
 the same whatever you pick. A role only decides which kinds you see, in which order, what they are called, and what
 your projects are called. Rename any kind in config.json under "kindNames", or on the Your role page.
@@ -17,19 +20,19 @@ TIP = {"project": "Work on the project itself", "meeting": "Meetings and calls",
 
 ROLES = {
     "specialist": {"name": "Analyst or specialist", "word": ("Project", "Projects"),
-                   "kinds": ("project", "meeting", "helping", "firefighting", "chasing", "datafixing", "admin"),
+                   "kinds": ("project", "helping", "firefighting", "chasing", "datafixing", "admin"),
                    "say": {}},
     "product": {"name": "Product owner", "word": ("Product", "Products"),
-                "kinds": ("project", "meeting", "firefighting", "chasing", "datafixing", "helping", "travel", "admin"),
+                "kinds": ("project", "firefighting", "chasing", "datafixing", "helping", "travel", "admin"),
                 "say": {"project": "Product work", "firefighting": "Quality issues", "chasing": "Chasing answers",
                         "datafixing": "Fixing master data"}},
     "sales": {"name": "Sales", "word": ("Customer", "Customers"),
-              "kinds": ("project", "travel", "firefighting", "chasing", "datafixing", "meeting", "helping", "admin"),
+              "kinds": ("project", "travel", "firefighting", "chasing", "datafixing", "helping", "admin"),
               "say": {"project": "Customer work", "firefighting": "Urgent customer issues",
                       "chasing": "Chasing internally", "datafixing": "Fixing prices and orders",
-                      "meeting": "Internal meeting", "helping": "Helping colleagues", "admin": "Admin and CRM"}},
+                      "helping": "Helping colleagues", "admin": "Admin and CRM"}},
     "leader": {"name": "Leader", "word": ("Area", "Areas"),
-               "kinds": ("project", "people", "meeting", "firefighting", "helping", "chasing", "admin"),
+               "kinds": ("project", "people", "firefighting", "helping", "chasing", "admin"),
                "say": {"project": "Strategy and planning", "firefighting": "Escalations"}},
 }
 DEFAULT = "specialist"

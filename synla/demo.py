@@ -45,6 +45,7 @@ ROUTINE = [
     ("ms-teams.exe", "Data platform standup | Microsoft Teams", 15, 15),
     ("msedge.exe", "Timesheet - Intranet - Microsoft Edge", 5, 10),
 ]
+ESCALATION = ("ms-teams.exe", "Invoice export failed | Microsoft Teams")   # a meeting about urgent work is urgent work
 
 
 def _ev(t, minutes, data):
@@ -77,11 +78,15 @@ def week(monday: datetime, seed: int = 7) -> dict:
         t = work(t, *ROUTINE[0][:2], rnd.randint(10, 25))
         if d in (0, 2, 4):
             t = work(t, *ROUTINE[2][:2], 15)
-        lunch_done = met = False
+        lunch_done = met = called = False
         while t < end:
             if not lunch_done and t.hour * 60 + t.minute >= 11 * 60 + 20:
                 t = idle(t, rnd.randint(25, 35))
                 lunch_done = True
+                continue
+            if d == 3 and not called and t.hour * 60 + t.minute >= 9 * 60 + 30:
+                t = work(t, *ESCALATION, 25)     # the export failed again: a quick call to sort it out
+                called = True
                 continue
             if d == 3 and not met and t.hour * 60 + t.minute >= 13 * 60 + 30:
                 t = idle(t, 75)                  # a supplier meeting in a room: the laptop stays on the desk

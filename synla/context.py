@@ -28,11 +28,21 @@ OUTLOOK_ITEM = re.compile(r"\s+[-\u2013]\s+(?P<what>Message|Melding|Meeting Seri
                           r"(\s+\((HTML|Plain Text|Rich Text|ren tekst|rik tekst)\))?$", re.I)
 OUTLOOK_APPS = ("outlook", "olk")
 MEETING_APPS = ("ms-teams", "teams", "zoom", "webex", "ciscocollabhost", "cpthost", "slack")
+# Dynamics 365 in the browser: "Account: Havbruk Vest AS - Dynamics 365", "Sales order: 000123 -- Finance and
+# Operations". The exact wording varies by version and app, so this only looks for the system's name at the end and
+# an optional "Type: name" in front.
+D365_MARK = re.compile(r"\s+(?:--?|\||[\u2013\u2014])\s+(?P<sys>(?:Microsoft\s+)?Dynamics\s*365\b[^|]*|Finance and Operations\b[^|]*"
+                       r"|Supply Chain Management\b[^|]*)$", re.I)
+D365_APP = re.compile(r"\s+(?:--?|\||[\u2013\u2014])\s+(Sales Hub|Customer Service Hub|Customer Service workspace|Field Service"
+                      r"|Sales Professional|Customer Service)$", re.I)
+D365_HUB = re.compile(r"\s+(?:--?|\||[\u2013\u2014])\s+(Sales Hub|Customer Service Hub|Customer Service workspace|Sales Professional)$",
+                      re.I)                     # an app name alone is enough when it can only be Dynamics 365
+D365_RECORD = re.compile(r"^(?P<type>[A-Za-zÆØÅæøå][A-Za-zÆØÅæøå ]{1,30}?):\s+(?P<name>.+)$")
 ALERT_TAGS = {"urgent", "haster", "viktig", "important", "alert", "warning", "varsel", "fw", "fwd", "re", "sv", "vs"}
 EMAIL_ADDRESS = re.compile(r"\S+@\S+")
 TOKEN = re.compile(r"[0-9A-Za-zÆØÅæøå][0-9A-Za-zÆØÅæøå\-./_]*")
 NOT_ID = re.compile(r"(19|20)\d\d|\d{4}-\d\d?-\d\d?|\d\d?[./]\d\d?([./]\d{2,4})?|\d+[.,]\d{1,2}|(v|rev|ver)\.?\d+(\.\d+)*")
-LETTERS_THEN_NUMBER = re.compile(r"[a-zæøå]{1,6}[-_/.]?\d[\d\-./_]*[a-zæøå]{0,3}")
+LETTERS_THEN_NUMBER = re.compile(r"[a-zæøå]{1,6}[-_/.]?\d[\d\-./_]*(?:[a-zæøå]{0,3}|(?:[-_][a-zæøå0-9]{1,8})+)")
 EXTS = set("xlsx xlsm xls csv docx doc pptx pdf py ipynb sql pbix pbip json md txt html js ts tmdl".split())
 WORD = re.compile(r"[A-Za-zÆØÅæøå][A-Za-zÆØÅæøå0-9_]{2,}")
 
@@ -45,7 +55,28 @@ def strip_app(title: str) -> str:
     t = title
     for _ in range(2):            # "Chat | Sales team | Microsoft Teams" has two suffixes
         t = OUTLOOK_ITEM.sub("", APP_SUFFIX.sub("", t))
+    if D365_MARK.search(t):
+        t = D365_APP.sub("", D365_MARK.sub("", t))
+    else:
+        t = D365_HUB.sub("", t)
     return t.strip()
+
+
+def d365(title: str) -> tuple | None:
+    """("ce" or "fo", record type, record name or page) for a Dynamics 365 tab, else None."""
+    t = (title or "").strip()
+    for _ in range(2):
+        t = APP_SUFFIX.sub("", t)
+    m = D365_MARK.search(t)
+    if m:
+        system = "fo" if re.search(r"finance|operations|supply chain", m.group("sys"), re.I) else "ce"
+        rest = D365_APP.sub("", t[:m.start()]).strip()
+    elif D365_HUB.search(t):
+        system, rest = "ce", D365_HUB.sub("", t).strip()
+    else:
+        return None
+    r = D365_RECORD.match(rest)
+    return (system, r.group("type").strip(), r.group("name").strip()) if r else (system, "", rest)
 
 
 def outlook_item(app: str, title: str) -> str | None:
@@ -125,6 +156,10 @@ def _features(app: str, title: str, call: bool) -> list:
         if len(bits) >= 2:
             out.append(f"folder:{norm(bits[-1])}")
 
+    crm = d365(title or "")
+    if crm and crm[1]:                         # a record: its type says something about the kind of work,
+        out.append(f"rec:{norm(crm[1])[:30]}")  # its name (the customer, the deal, the case) about the project
+        out.append(f"record:{norm(crm[2])[:60]}")
     item = outlook_item(app, title or "")
     m = EMAIL_SUBJECT.match(t)
     if m:
@@ -142,7 +177,8 @@ def _features(app: str, title: str, call: bool) -> list:
         out.append("is:chat")
     if a in MEETING_APPS and re.search(r"\b(meeting|call|møte|standup|stand-up|review)\b", t, re.I):
         out.append("is:meeting")              # a meeting window in Teams or Zoom; the word alone in an email is not
-    if re.search(r"\b(urgent|asap|haster|error|failed|feil|down|incident|broken)\b", t, re.I):
+    if re.search(r"\b(urgent|asap|haster|akutt|error|failed|feil|down|incident|broken|critical|kritisk|outage|nedetid|"
+                 r"breakdown|emergency)\b", t, re.I):
         out.append("is:urgent")
     if re.search(r"\?\s*$|\b(where is|any update|status on|waiting for|reminder|purring|påminnelse)\b", t, re.I):
         out.append("is:asking")

@@ -20,15 +20,14 @@ from .context import features
 from .model import Guess, UNKNOWN
 
 # How much a feature type is worth. A file name or an email subject is a strong clue; the app name is weak.
-TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "id": 3.0, "folder": 2.5, "is": 1.5, "word": 1.0, "app": 0.6,
-               "ext": 0.3}
+TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "id": 3.0, "record": 3.0, "folder": 2.5, "is": 1.5, "rec": 1.5,
+               "word": 1.0, "app": 0.6, "ext": 0.3}
 # How many answers a clue needs before it is trusted. The very same window again is trusted after one answer, so
 # Synla does not ask about it twice; a word needs a few.
-TRUST = {"win": 0.5, "id": 1.0}
+TRUST = {"win": 0.5, "id": 1.0, "record": 1.0}
 
 # Built-in clues for the kind of work. Learning from the user can override any of these.
-KIND_RULES = {
-    "is:meeting": ("meeting", 3.0),
+KIND_RULES = {          # a call is not a kind of work: Synla notes the meeting itself and asks what it was for
     "is:chat": ("helping", 1.5),
     "is:urgent": ("firefighting", 2.5),
     "is:asking": ("chasing", 2.5),
@@ -38,14 +37,20 @@ ASK_BELOW = 0.7      # blocks under this confidence are shown first and highligh
 # The kind of work is learned from the window itself and its shape (a call, a chat, an email thread), never from
 # topic words: one answer that the "Data platform standup" was a meeting must not make every window with "data" in
 # its title a meeting.
-KIND_CLUES = ("win", "file", "subject", "is")
+KIND_CLUES = ("win", "file", "subject", "is", "rec")
+RETIRED = {"meeting"}   # older answers may say "meeting"; new guesses say what the meeting was for
+# Being in a call says how the work was done, not what kind it was: one escalation call must not make every call
+# firefighting. Clues learned from calls by earlier versions are left out too.
+NOT_KIND_CLUES = {"is:meeting"}
 # The shape of a window (a call, a chat, a reply) says what kind of work it is, not which project.
-NOT_PROJECT_CLUES = ("is",)
+NOT_PROJECT_CLUES = ("is", "rec")
 
 
 def counts(target: str, f: str) -> bool:
     typ = f.split(":", 1)[0]
-    return typ in KIND_CLUES if target == "kind" else typ not in NOT_PROJECT_CLUES
+    if target == "kind":
+        return typ in KIND_CLUES and f not in NOT_KIND_CLUES
+    return typ not in NOT_PROJECT_CLUES
 
 
 def _plain(text: str) -> str:
@@ -108,7 +113,7 @@ class Classifier:
                     why[label].append((v, f))
             if target == "project":
                 val = f.split(":", 1)[1] if ":" in f else f
-                if f.split(":", 1)[0] in ("file", "subject", "folder", "word", "id"):
+                if f.split(":", 1)[0] in ("file", "subject", "folder", "word", "id", "record"):
                     for p, kws in self.project_keywords.items():
                         if any(k in val for k in kws):
                             votes[p] += RULE_WEIGHT
@@ -134,6 +139,7 @@ class Classifier:
         feats = features(app, title, call)
         pv, pwhy = self._votes("project", feats)
         kv, kwhy = self._votes("kind", feats)
+        kv = {k: v for k, v in kv.items() if k not in RETIRED}
         project, pc = self._pick(pv)
         kind, kc = self._pick(kv)
         if kind == UNKNOWN and project != UNKNOWN:
@@ -158,4 +164,4 @@ def explain(f: str) -> str:
         return f'keyword in "{val[:30]}"'
     return {"win": "same window as before", "file": f"file {val[:30]}", "subject": "same email thread",
             "folder": f"folder {val[:30]}", "app": f"app {val}", "word": f'word "{val[:30]}"',
-            "id": f'number "{val[:30]}"'}.get(kind, f[:30])
+            "id": f'number "{val[:30]}"', "record": f'record "{val[:30]}"', "rec": f"a {val} record"}.get(kind, f[:30])
