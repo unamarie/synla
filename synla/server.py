@@ -34,22 +34,22 @@ APPS = {"excel.exe": "Excel", "winword.exe": "Word", "powerpnt.exe": "PowerPoint
         "explorer.exe": "File Explorer", "notepad.exe": "Notepad", "onenote.exe": "OneNote", "acrobat.exe": "Acrobat",
         "acrord32.exe": "Acrobat", "slack.exe": "Slack", "zoom.exe": "Zoom", "ssms.exe": "SQL Server Management Studio",
         "devenv.exe": "Visual Studio"}
-PALETTE = 8      # the colours of Solvi and unadata.dev; checked for colour blindness in light and dark mode
+PALETTE = 8      # a Norwegian beach: sea glass, driftwood, heather, marram grass, sea pinks, lichen, fjord, rose hips
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 NOT_SORTED = "Not sorted"
 
 CSS = """
-:root{--paper:#f6f6f3;--surface:#fff;--ink:#0a1236;--muted:#585a60;--line:#e6ded6;--track:#ede9e3;--sea:#006690;
- --sun:#f85e0a;--sunink:#bb4812;--hatch:#f8d2b8;--amber:#f0aa2a;--ochre:#b8862f;--ochreink:#835a0d;--green:#2f7a55;--red:#b23a2a;
- --shadow:#0a12360f;--toastlink:#f0aa2a;--pillbg:#f7e6da;--pillink:#9b3a0d;--yellowbg:#f9f4ec;--yellowline:#e6d5b6;--greenbg:#eef4f1;
- --greenline:#c1d7cc;--redbg:#faf1f0;--redline:#e9c8c3;
- --p0:#006690;--p1:#b8862f;--p2:#1b7c51;--p3:#4e59b1;--p4:#b23a2a;--p5:#119391;--p6:#f85e0a;--p7:#953d7c;
+:root{--paper:#f3f4ef;--surface:#fff;--ink:#1f2b26;--muted:#5d665f;--line:#e1e4dc;--track:#e8eae3;--sea:#0b746c;
+ --sun:#dd9314;--sunink:#8a5601;--hatch:#f7deb5;--amber:#f0b43c;--ochre:#c28e24;--ochreink:#7c5500;--green:#3f7a3c;--red:#b8352a;
+ --shadow:#1f2b260f;--toastlink:#f0b43c;--pillbg:#f9e9ce;--pillink:#7c5500;--yellowbg:#faf6ed;--yellowline:#ead7b2;--greenbg:#f0f4ef;
+ --greenline:#c5d7c5;--redbg:#faf1f0;--redline:#ebc6c3;
+ --p0:#078d82;--p1:#8f5214;--p2:#764aa2;--p3:#538c2d;--p4:#b04c7d;--p5:#bd8703;--p6:#006cb4;--p7:#ab4238;
  color-scheme:light}
-@media (prefers-color-scheme:dark){:root{--paper:#080f2c;--surface:#111c44;--ink:#ece5d4;--muted:#9eabb7;--line:#222d5a;
- --track:#1a2550;--sea:#5fb3d3;--sun:#fa7a32;--sunink:#fa7a32;--ochre:#d8a64e;--ochreink:#d8a64e;--green:#6cc196;--red:#e46a54;
- --shadow:#00000040;--toastlink:#9b3a0d;--pillbg:#462312;--pillink:#ffb48a;--hatch:#5d2f19;--yellowbg:#31240e;--yellowline:#5a431a;
- --greenbg:#132c20;--greenline:#28523c;--redbg:#371b17;--redline:#6a372f;
- --p0:#1091c9;--p1:#be861d;--p2:#30a46f;--p3:#6d7cdf;--p4:#e46a54;--p5:#15a7a5;--p6:#cd5702;--p7:#bf5da2;
+@media (prefers-color-scheme:dark){:root{--paper:#171a18;--surface:#202421;--ink:#ece8de;--muted:#a3a89f;--line:#353a35;
+ --track:#2a2e2a;--sea:#4fbfb0;--sun:#eba941;--sunink:#eba941;--ochre:#d9a850;--ochreink:#d9a850;--green:#8cc68a;--red:#ee7b6b;
+ --shadow:#00000059;--toastlink:#7c5500;--pillbg:#3c2a0e;--pillink:#edbf71;--hatch:#5e4216;--yellowbg:#31240e;--yellowline:#5a431a;
+ --greenbg:#1c2b18;--greenline:#365030;--redbg:#371b18;--redline:#6a3730;
+ --p0:#0aa99b;--p1:#b06f35;--p2:#9a6ec9;--p3:#6ca649;--p4:#d16b9b;--p5:#bf8909;--p6:#328bd6;--p7:#d4675b;
  color-scheme:dark}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 "Segoe UI",-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;
@@ -188,7 +188,7 @@ ul.plain{margin:6px 0;padding-left:20px}ul.plain li{margin:4px 0}
 .good{color:var(--green);font-weight:700}.bad{color:var(--red);font-weight:700}
 .offscreen{position:absolute;left:-9999px;width:1px;height:1px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:var(--ink);color:var(--paper);
- border-radius:12px;padding:11px 16px;display:flex;gap:16px;align-items:center;box-shadow:0 12px 32px #0a123640;transition:.2s;z-index:30;max-width:92vw}
+ border-radius:12px;padding:11px 16px;display:flex;gap:16px;align-items:center;box-shadow:0 12px 32px #00000040;transition:.2s;z-index:30;max-width:92vw}
 #toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}#toast button{background:none;border:0;color:var(--toastlink);font-weight:700;cursor:pointer}
 @media (max-width:720px){.top .in{gap:8px;padding:10px 12px}nav a{padding:6px 7px;font-size:.92rem}.brand{font-size:1rem}.rec span{display:none}main{padding:20px 14px 80px}
  .row{grid-template-columns:1fr;gap:6px}.lab{padding-top:0}.hint{margin-left:0}.ask{padding:18px 16px}.two{grid-template-columns:1fr}
