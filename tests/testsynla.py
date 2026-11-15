@@ -1,3 +1,4 @@
+import base64
 import json
 import sys
 import threading
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from synla import demo, protect, record, recorder, report, workload
+from synla import demo, notify, protect, record, recorder, report, workload
 from synla.__main__ import verify
 from synla.app import DELETED, Synla
 from synla.model import MANUAL_APP
@@ -224,7 +225,7 @@ def play(store, script, start):
     def sleep(_):
         probe.i += 1
         t[0] += recorder.POLL
-    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(script), seal_weeks=False)
+    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(script), seal_weeks=False, remind=False)
 
 
 EXCEL = ("EXCEL.EXE", "Budget 2027.xlsx - Excel", 0, False)
@@ -315,26 +316,44 @@ def server(app):
 
 
 def post(url, body, headers):
+    return post_json(url, body, headers)[0]
+
+
+def post_json(url, body, headers):
     req = urllib.request.Request(url, method="POST", headers=headers, data=json.dumps(body).encode())
     try:
-        return LOCAL.open(req).status
+        with LOCAL.open(req) as r:
+            return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
-        return e.code
+        return e.code, None
 
 
-def test_review_page_and_answers_over_http(app, server):
+OK = {"Content-Type": "application/json", "X-Synla-Token": "secret-token"}
+
+
+def test_today_page_asks_and_answers_over_http(app, server):
     base, _ = server
     d = MONDAY.date()
     html = LOCAL.open(f"{base}/day?date={d}").read().decode()
-    assert "need your answer" in html and "Biggest unsorted windows" in html and "secret-token" in html
-    b = app.day(d)[0]
-    body = {"date": str(d), "ids": [s.id for s in b.segments], "project": "Internal", "kind": "admin", "how": "block"}
-    ok = {"Content-Type": "application/json", "X-Synla-Token": "secret-token"}
-    assert post(f"{base}/api/answer", body, ok) == 200
-    assert app.day(d)[0].confirmed
-    assert "unplanned work" in LOCAL.open(f"{base}/week?date={d}").read().decode()
+    assert "Five quick questions" in html and "What was this?" in html and "secret-token" in html
+    q = app.questions(d)["items"][0]
+    status, reply = post_json(f"{base}/api/answer", {"date": str(d), "ids": q["ids"], "project": "Internal",
+                                                     "kind": "firefighting", "how": "window", "asked": True}, OK)
+    assert status == 200 and reply["undo"]
+    assert "Four quick questions" in LOCAL.open(f"{base}/day?date={d}").read().decode()
+    assert post(f"{base}/api/undo", {"token": reply["undo"]}, OK) == 200
+    assert "Five quick questions" in LOCAL.open(f"{base}/day?date={d}").read().decode()
+    assert post(f"{base}/api/skip", {"date": str(d), "code": q["code"]}, OK) == 200
+    assert app.questions(d)["items"][0]["code"] != q["code"]
+    status, reply = post_json(f"{base}/api/project", {"name": "  Budget   2027 "}, OK)
+    assert reply["name"] == "Budget 2027" and "Budget 2027" in app.projects
+    week = LOCAL.open(f"{base}/week?date={d}").read().decode()
+    assert "Unplanned work" in week and "Not sealed yet" in week
     assert "Never recorded" in LOCAL.open(f"{base}/data").read().decode()
+    assert "Copy table" in LOCAL.open(f"{base}/week/timesheet?date={d}").read().decode()
+    assert "Focus time" in LOCAL.open(f"{base}/week/indicators?date={d}").read().decode()
     assert LOCAL.open(f"{base}/export.csv?date={d}").read().decode().startswith("date,project,hours")
+    assert LOCAL.open(f"{base}/ping").read() == b"synla"
 
 
 def test_other_websites_cannot_change_anything(app, server):
@@ -486,7 +505,7 @@ def test_record_pages_over_http(app, server):
     assert post(f"{base}/api/settings", {"recordEmail": "not an email"}, ok) == 400
     assert post(f"{base}/api/settings", {"recordEmail": "me@example.com"}, ok) == 200
     week = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
-    assert "Workload this week" in week and "Fingerprint" in week and "mailto:me@example.com" in week
+    assert "Sealed in your record book" in week and "Fingerprint" in week and "mailto:me@example.com" in week
     assert "The record checks out" in LOCAL.open(f"{base}/record").read().decode()
     assert "Year report" in LOCAL.open(f"{base}/year?y=2026").read().decode()
     seq = app.record.seals()[0]["seq"]
@@ -503,3 +522,120 @@ def test_outside_hours_count_only_the_part_outside_the_working_day():
     assert round(report.outside_minutes(seg, t(7, 0), t(17, 0))) == 30
     sunday = (MONDAY - timedelta(days=1)).replace(hour=10)
     assert round(report.outside_minutes(Segment(sunday, sunday + timedelta(hours=1), "a", "x"), t(7, 0), t(17, 0))) == 60
+
+
+# ---- Synla asks, you tap ---------------------------------------------------------------------------------------------
+def answer_questions(app, d):
+    n = 0
+    while app.questions(d)["items"]:
+        it = app.questions(d)["items"][0]
+        app.answer(d, it["ids"], *truth(it["title"]), how="window", asked=True)
+        n += 1
+    return n
+
+
+def test_synla_asks_about_a_few_big_windows_and_less_every_day(app):
+    q = app.questions(MONDAY.date())
+    assert len(q["items"]) == 5                                     # a new user: at most five questions
+    assert all(it["unsure"] >= 5 for it in q["items"])
+    assert [it["unsure"] for it in q["items"]] == sorted((it["unsure"] for it in q["items"]), reverse=True)
+    asked = [answer_questions(app, (MONDAY + timedelta(days=i)).date()) for i in range(5)]
+    print(f"\nquestions per day, Monday to Friday: {asked}")
+    assert asked[0] == 5 and sum(asked[1:]) <= 6 and asked[4] <= 1
+    assert guessed_right(app, [(MONDAY + timedelta(days=i)).date() for i in range(5)]) > 0.95
+
+
+def test_one_answer_is_enough_for_the_same_window(app):
+    d = MONDAY.date()
+    inbox = next(it for it in app.questions(d)["items"] if it["title"] == "Inbox - Outlook")
+    app.answer(d, inbox["ids"], "Internal", "admin", how="window", asked=True)
+    tuesday = (MONDAY + timedelta(days=1)).date()
+    assert not any(it["title"] == "Inbox - Outlook" for it in app.questions(tuesday)["items"])
+
+
+def test_one_meeting_does_not_make_every_window_a_meeting(app):
+    d = MONDAY.date()
+    standup = next(w for w in app.unsorted_windows(app.day(d), 50) if "standup" in w["title"])
+    app.answer(d, standup["ids"], "Data platform", "meeting", how="window")
+    g = app.classifier.guess("Code.exe", "quality-gate.py - data-platform - Visual Studio Code")
+    assert (g.project, g.kind) == ("Data platform", "project") and g.confidence >= 0.7
+    other = app.classifier.guess("ms-teams.exe", "Weekly status meeting | Microsoft Teams", True)
+    assert other.kind == "meeting" and other.confidence < 0.7      # another meeting: Synla asks which project
+
+
+def test_the_daily_limit_and_asking_for_more(app):
+    d = (MONDAY + timedelta(days=3)).date()
+    c = app.store.config()
+    c["projects"] = {"Internal": {"keywords": []}}                  # no keywords: everything is unsure
+    app.store.save_config(c)
+    app.reload()
+    for _ in range(5):
+        it = app.questions(d)["items"][0]
+        app.answer(d, it["ids"], "Internal", "admin", how="window", asked=True)
+    q = app.questions(d)
+    assert q["items"] == [] and q["waiting"] > 0
+    app.ask_more(d)
+    assert len(app.questions(d)["items"]) == q["waiting"]
+
+
+def test_skip_keeps_the_guess_and_is_stored_as_a_code(app):
+    d = MONDAY.date()
+    first = app.questions(d)["items"][0]
+    app.skip(d, first["code"])
+    assert all(it["code"] != first["code"] for it in app.questions(d)["items"])
+    assert "Invoice" not in (app.store.dir / "days.json").read_text(encoding="utf-8")
+    app.undo(app.last_undo)
+    assert app.questions(d)["items"][0]["code"] == first["code"]
+
+
+def test_undo_takes_back_the_answer_and_what_was_learned(app):
+    d = MONDAY.date()
+    plain = lambda m: {k: v for k, v in m.items() if k != "version"}
+    memory, log = plain(app.store.memory()), len(app.store.corrections())
+    it = app.questions(d)["items"][0]
+    app.answer(d, it["ids"], "Internal", "admin", how="window", asked=True)
+    token = app.last_undo
+    assert plain(app.store.memory()) != memory and app.store.day_state(d)["answered"] == 1
+    app.undo(token)
+    assert plain(app.store.memory()) == memory and len(app.store.corrections()) == log
+    assert not app.store.day_state(d).get("answered") and not any(b.confirmed for b in app.day(d))
+    with pytest.raises(ValueError):
+        app.undo(token)                                             # only once
+
+
+def test_the_week_in_one_sentence(app):
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    assert workload.sentence(app.workload(MONDAY.date())) == "Two long days and little time for focused work."
+    assert workload.sentence({"level": "green", "rows": []}) == "Nothing stands out."
+
+
+class AtTheComputer:
+    def __init__(self, idle=0, mic=False):
+        self.idle, self.mic = idle, mic
+
+    def idle_seconds(self):
+        return self.idle
+
+    def mic_in_use(self):
+        return self.mic
+
+
+def test_the_end_of_day_reminder(app):
+    from datetime import time as t
+    assert notify.reminder_time(app.config) == t(16, 15)            # 45 minutes before the workday ends
+    four = MONDAY.replace(hour=16, minute=20)
+    assert not notify.due(MONDAY.replace(hour=15), app.config, None)
+    assert notify.due(four, app.config, None) and not notify.due(four, app.config, str(four.date()))
+    assert not notify.due((MONDAY + timedelta(days=5)).replace(hour=17), app.config, None)      # Saturday
+    assert notify.reminder_time({"reminder": "off"}) is None
+    shown = []
+    assert notify.maybe_remind(app.store, AtTheComputer(mic=True), app.config, four, show=lambda *a: shown.append(a)) is None
+    assert notify.maybe_remind(app.store, AtTheComputer(idle=600), app.config, four, show=lambda *a: shown.append(a)) is None
+    assert notify.maybe_remind(app.store, AtTheComputer(), app.config, four, show=lambda *a: shown.append(a)) == 5
+    assert notify.maybe_remind(app.store, AtTheComputer(), app.config, four, show=lambda *a: shown.append(a)) is None
+    assert shown == [("5 quick questions about today", "Takes less than a minute. Click to answer.")]
+    xml = notify.toast_xml(*shown[0])
+    assert 'launch="synla:open"' in xml
+    script = base64.b64decode(notify.command(xml)[-1]).decode("utf-16-le")
+    assert "CreateToastNotifier('Synla')" in script and "5 quick questions" in script

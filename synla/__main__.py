@@ -1,8 +1,9 @@
 """Command line.
 
-  python -m synla                 open the review page
+  python -m synla                 open Synla's pages in your browser
   python -m synla record          start Synla's own recorder (Windows); keep it running in the background
   python -m synla autostart on    start the recorder when you sign in to Windows (off to stop)
+  python -m synla remind          show what the end of day reminder looks like
   python -m synla pause 60        pause recording for 60 minutes (resume to start again)
   python -m synla week            print this week's summary
   python -m synla export          write this week's timesheet as CSV
@@ -11,7 +12,10 @@
   python -m synla verify          check the record book; add a fingerprint or a downloaded record to check that
 """
 import argparse
+import json
 import sys
+import urllib.request
+import webbrowser
 from datetime import date, timedelta
 
 from . import demo, record, report
@@ -19,7 +23,8 @@ from .app import Synla
 from .server import csv_text, serve
 from .store import Store
 
-COMMANDS = ["review", "record", "autostart", "pause", "resume", "week", "export", "demo", "seal", "verify"]
+COMMANDS = ["review", "open", "record", "autostart", "remind", "pause", "resume", "week", "export", "demo", "seal",
+            "verify"]
 
 
 def main(argv=None):
@@ -38,7 +43,9 @@ def main(argv=None):
         monday = demo.write(path)
         store.save_config(dict(demo.DEMO_CONFIG, source=str(path)))
         print(f"Made a fictional week starting {monday:%A %d %B} in {store.dir}")
-        serve(Synla(store), a.port, start=monday.date())
+        app = Synla(store)
+        app.home = monday.date()
+        serve(app, a.port)
         return
 
     store = Store(a.home)
@@ -53,6 +60,9 @@ def main(argv=None):
             sys.exit("The recorder is already running.")
         print("Recording. Close this window or press Ctrl+C to stop. "
               "To run it in the background from sign-in: python -m synla autostart on")
+        from . import notify
+        if notify.reminder_time(store.config()):
+            recorder.register_reminder(True)      # so the end of day reminder can show and open Synla
         try:
             recorder.run(store)
         except KeyboardInterrupt:
@@ -65,7 +75,18 @@ def main(argv=None):
         from . import recorder
         on = (a.value or "on").lower() != "off"
         recorder.autostart(on)
-        print("The recorder now starts when you sign in to Windows." if on else "Autostart is off.")
+        print("The recorder now starts when you sign in to Windows, with a reminder when Synla has questions."
+              if on else "Autostart and the reminder are off.")
+        return
+
+    if a.command == "remind":
+        if sys.platform != "win32":
+            sys.exit("The reminder is a Windows notification.")
+        from . import notify, recorder
+        recorder.register_reminder(True)
+        ok = notify.show("2 quick questions about today", "This is how Synla's reminder looks. Click it to open Synla.",
+                         wait=True)
+        print("Shown." if ok else "Windows did not show it. Check that notifications are on for Synla in Settings.")
         return
 
     if a.command in ("pause", "resume"):
@@ -76,6 +97,9 @@ def main(argv=None):
 
     if a.command == "verify":
         return verify(store, a.value)
+
+    if a.command == "open":
+        return open_page(store, a.port)
 
     app = Synla(store)
     if a.command == "seal":
@@ -95,6 +119,21 @@ def main(argv=None):
         with open(out, "w", encoding="utf-8", newline="") as f:
             f.write(csv_text(app, d))
         print("wrote", out)
+
+
+def open_page(store, port):
+    """What the reminder opens: Synla's pages, reusing them if they already run. They stop after 30 idle minutes."""
+    try:
+        p = json.loads((store.dir / "server.json").read_text(encoding="utf-8"))["port"]
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        if opener.open(f"http://127.0.0.1:{p}/ping", timeout=2).read() == b"synla":
+            webbrowser.open(f"http://127.0.0.1:{p}/")
+            return
+    except (OSError, ValueError, KeyError):
+        pass
+    app = Synla(store)
+    app.forget_old()
+    serve(app, port, idle_minutes=30)
 
 
 def verify(store, value=None):

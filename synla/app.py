@@ -1,4 +1,5 @@
 """Ties it together: reads activity, applies what Synla has learned and what you have answered."""
+import secrets
 import time as clock
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
@@ -6,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from . import protect, recorder, report, workload
 from .blocks import _subtract, blocks, segments
 from .classify import ASK_BELOW, Classifier
+from .blocks import NOISE
 from .model import KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment
 from .record import FORMAT, RecordBook
 from .source import ActivityWatch, Auto, JsonFile, SynlaRecorder, day_range
@@ -15,16 +17,22 @@ LEARN_MIN = 1.0          # minutes; a window you only glanced at is not learned 
 DELETED = "Window name deleted"
 AUTO_SEAL_AFTER = 7      # days after a week ends, an unsealed week is sealed as it stands
 CACHE_SECONDS = 20       # a page asks for the same days several times; read them once
+QUESTIONS_PER_DAY = 5    # Synla asks about at most this many windows a day, unless you ask for more
+ASK_MIN = 5.0            # minutes; smaller unsure windows keep Synla's best guess instead of becoming a question
 
 
 class Synla:
     def __init__(self, store):
         self.store = store
         self.record = RecordBook(store)
+        self.home = None          # the day the Today page shows; None is today (the demo sets its own week)
+        self.last_undo = None     # token for taking back the latest change
+        self._undo = None
         self.reload()
 
     def reload(self):
         self._cache = {}
+        self._guesses = {}
         self.config = self.store.config()
         self.classifier = Classifier(self.config, self.store.memory(), self.store.hasher())
         src = self.config.get("source", "auto")
@@ -56,6 +64,22 @@ class Synla:
 
     def _changed(self):
         self._cache = {}
+        self._guesses = {}
+
+    def guess(self, s: Segment):
+        """Synla's guess for one window on its own (a block's guess is the weakest of its windows)."""
+        k = (s.app, s.title, s.call)
+        if k not in self._guesses:
+            self._guesses[k] = self.classifier.guess(s.app, s.title, s.call)
+        return self._guesses[k]
+
+    def unsure(self, b, s: Segment) -> bool:
+        """Does Synla need you for this stretch? Decided per window, so one unclear window does not make a whole
+        block unclear. A glance shorter than a minute goes with its block."""
+        if b.confirmed or s.app == MANUAL_APP or s.title == DELETED:
+            return False
+        g = self.guess(s) if s.minutes >= NOISE else b.guess
+        return g.confidence < ASK_BELOW or g.project == UNKNOWN
 
     def _read_day(self, d: date) -> list:
         start, end = day_range(d)
@@ -109,24 +133,89 @@ class Synla:
         for b in bl:
             if b.confirmed:
                 continue
-            unsure = b.guess.confidence < ASK_BELOW or b.guess.project == UNKNOWN
             for s in b.segments:
                 if s.title == DELETED or s.app == MANUAL_APP:
                     continue
-                a = agg.setdefault(s.key, {"app": s.app, "title": s.title, "unsure": 0.0, "minutes": 0.0,
-                                           "ids": [], "blocks": set()})
+                unsure = self.unsure(b, s)
+                a = agg.setdefault(s.key, {"key": s.key, "app": s.app, "title": s.title, "unsure": 0.0,
+                                           "minutes": 0.0, "ids": [], "blocks": set(), "call": False,
+                                           "first": s.start, "last": s.end})
                 a["minutes"] += s.minutes
                 a["unsure"] += s.minutes if unsure else 0.0
                 a["ids"].append(s.id)
                 a["blocks"].add(b.id)
+                a["call"] = a["call"] or s.call
+                a["first"], a["last"] = min(a["first"], s.start), max(a["last"], s.end)
         ranked = sorted((a for a in agg.values() if a["unsure"] >= 1), key=lambda a: -a["unsure"])
         return ranked[:limit]
 
+    def today(self) -> date:
+        return self.home or date.today()
+
+    def last_day(self) -> date:
+        """The last day the pages let you go to: today, or the end of the demo week."""
+        t = date.today()
+        return max(t, self.home + timedelta(days=6 - self.home.weekday())) if self.home else t
+
+    # ---- questions -------------------------------------------------------------------------------------------
+    def window_code(self, key: str) -> str:
+        """A one-way code for a window, so a skipped question can be remembered without storing its name."""
+        return self.store.hasher()("ask:" + key)[:16]
+
+    def questions(self, d: date) -> dict:
+        """What Synla asks you about this day: the windows behind most of the unsure time, biggest first.
+        Only windows of ASK_MIN minutes or more, at most QUESTIONS_PER_DAY a day; the rest keeps Synla's best guess."""
+        state = self.store.day_state(d)
+        skipped = set(state.get("skipped", []))
+        items = []
+        for w in self.unsorted_windows(self.day(d), limit=100):
+            if w["unsure"] < ASK_MIN:
+                continue
+            code = self.window_code(w["key"])
+            if code in skipped:
+                continue
+            items.append(dict(w, code=code, guess=self.classifier.guess(w["app"], w["title"], w["call"])))
+        answered = int(state.get("answered", 0))
+        room = len(items) if state.get("more") else max(0, QUESTIONS_PER_DAY - answered)
+        return {"items": items[:room], "waiting": max(0, len(items) - room), "answered": answered,
+                "skipped": len(skipped)}
+
+    def skip(self, d: date, code: str):
+        """Not now: this window keeps Synla's best guess and is not asked about again this day."""
+        snap = self._snapshot()
+        state = self.store.day_state(d)
+        state["skipped"] = sorted(set(state.get("skipped", [])) | {code})
+        self.store.save_day_state(d, state)
+        self._done(snap)
+
+    def ask_more(self, d: date):
+        """Lift today's limit on questions."""
+        state = self.store.day_state(d)
+        state["more"] = True
+        self.store.save_day_state(d, state)
+
+    def day_numbers(self, d: date) -> dict:
+        """Minutes for the Today page: sorted by you, sorted by Synla on its own, and still unsure."""
+        out = {"total": 0.0, "yours": 0.0, "sure": 0.0, "unsure": 0.0}
+        for b in self.day(d):
+            for s in b.segments:
+                out["total"] += s.minutes
+                out["yours" if b.confirmed else "unsure" if self.unsure(b, s) else "sure"] += s.minutes
+        return out
+
     # ---- answering -------------------------------------------------------------------------------------------
-    def answer(self, d: date, ids, project: str, kind: str, how: str = "block") -> int:
+    def answer(self, d: date, ids, project: str, kind: str, how: str = "block", asked: bool = False) -> int:
         """Your answer for a set of stretches (a block, every stretch of one window, or part of a block).
-        Saved for the timesheet, and learned from for next time. Returns how many stretches it covered."""
-        return self._apply(d, [(set(ids), project, kind)], how)
+        Saved for the timesheet, and learned from for next time. Returns how many stretches it covered.
+        asked: the answer came from one of the day's questions, so it counts against the day's limit."""
+        snap = self._snapshot()
+        n = self._apply(d, [(set(ids), project, kind)], how)
+        if asked:
+            state = self.store.day_state(d)
+            state["answered"] = int(state.get("answered", 0)) + 1
+            self.store.save_day_state(d, state)
+        self._done(snap)
+        return n
 
     def answer_block(self, d: date, block_id: str, project: str, kind: str) -> int:
         block = next((b for b in self.day(d) if b.id == block_id), None)
@@ -137,10 +226,36 @@ class Synla:
     def approve_confident(self, d: date) -> int:
         """Accept every guess Synla is sure about, in one click. These are marked as approved in bulk, so they never
         count as proof that Synla was right."""
-        groups = [({s.id for s in b.segments}, b.guess.project, b.guess.kind) for b in self.day(d)
-                  if not b.confirmed and b.guess.confidence >= ASK_BELOW and b.guess.project != UNKNOWN]
+        groups = []
+        for b in self.day(d):
+            ids = {s.id for s in b.segments if not self.unsure(b, s)}
+            if not b.confirmed and ids and b.guess.project != UNKNOWN:
+                groups.append((ids, b.guess.project, b.guess.kind))
+        snap = self._snapshot()
         self._apply(d, groups, "bulk")
+        self._done(snap)
         return len(groups)
+
+    # ---- undo ------------------------------------------------------------------------------------------------
+    def _snapshot(self) -> dict:
+        return {"decisions": self.store.decisions(), "memory": self.store.memory(),
+                "log": len(self.store.corrections()), "days": self.store.days()}
+
+    def _done(self, snap: dict):
+        self.last_undo = secrets.token_hex(8)
+        self._undo = (self.last_undo, snap)
+
+    def undo(self, token: str):
+        """Takes back the latest answer, approval or skip: your answers, what Synla learned from it, and the log."""
+        if not self._undo or not secrets.compare_digest(self._undo[0], token or ""):
+            raise ValueError("There is nothing to undo.")
+        snap = self._undo[1]
+        self._undo = self.last_undo = None
+        self.store.save_decisions(snap["decisions"])
+        self.store.save_memory({k: v for k, v in snap["memory"].items() if k != "version"})
+        self.store.truncate_log(snap["log"])
+        self.store.save_days(snap["days"])
+        self.reload()
 
     def _apply(self, d: date, groups: list, how: str) -> int:
         bl = self.day(d)
@@ -212,6 +327,7 @@ class Synla:
         entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind})
         self.store.save_manual(entries)
         self._changed()
+        return utc_key(s)
 
     def remove_time(self, start_id: str):
         self.store.save_manual([e for e in self.store.manual() if e["start"] != start_id])

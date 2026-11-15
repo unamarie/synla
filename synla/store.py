@@ -127,6 +127,37 @@ class Store:
             return []
         return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
 
+    def truncate_log(self, n: int):
+        """Keep the first n entries: used when you undo an answer, so it does not count as one."""
+        log = self.corrections()
+        if len(log) > n:
+            tmp = self.dir / "corrections.jsonl.tmp"
+            tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in log[:n]), encoding="utf-8")
+            os.replace(tmp, self.dir / "corrections.jsonl")
+
+    # days.json: per day, how many questions you answered, which you skipped (as one-way codes), and whether
+    # you asked for more than the daily limit
+    def days(self) -> dict:
+        return self._read("days.json", {})
+
+    def save_days(self, d: dict):
+        self._write("days.json", d)
+
+    def day_state(self, day) -> dict:
+        return dict(self.days().get(day.isoformat(), {}))
+
+    def save_day_state(self, day, state: dict):
+        d = self.days()
+        d[day.isoformat()] = state
+        self.save_days(d)
+
+    # reminded.json: the last day the end-of-day reminder was shown (written by the recorder only)
+    def reminded(self) -> str | None:
+        return self._read("reminded.json", {}).get("day")
+
+    def save_reminded(self, day):
+        self._write("reminded.json", {"day": day.isoformat()})
+
     # manual.json: time away from the computer that you added yourself (start, end, project, kind; no notes)
     def manual(self) -> list:
         return self._read("manual.json", [])
@@ -156,6 +187,10 @@ class Store:
         recent_manual = [e for e in m if datetime.fromisoformat(e["start"]) >= cutoff]
         if len(recent_manual) != len(m):
             self.save_manual(recent_manual)
+        days = self.days()
+        keep_days_state = {k: v for k, v in days.items() if k >= cutoff.date().isoformat()}
+        if len(keep_days_state) != len(days):
+            self.save_days(keep_days_state)
         log = self.corrections()
         recent = [e for e in log if datetime.fromisoformat(e["at"]) >= cutoff]
         if len(recent) != len(log):
@@ -166,7 +201,7 @@ class Store:
     def delete_everything(self, record_book: bool = False):
         """Removes Synla's data. The record book only when asked. Your settings (config.json) stay."""
         names = ["decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json", "manual.json",
-                 "activity.db", "activity.db-wal", "activity.db-shm"]
+                 "days.json", "reminded.json", "activity.db", "activity.db-wal", "activity.db-shm"]
         if record_book:
             names += ["record.db", "record.db-wal", "record.db-shm"]
         for name in names:

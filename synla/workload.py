@@ -90,3 +90,33 @@ def show(value, fmt: str) -> str:
         return f"{int(value)}"
     return f"{value:.0f}"
 
+
+
+NUMBERS = ("no", "one", "two", "three", "four", "five", "six", "seven")
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{NUMBERS[n] if 0 <= n < len(NUMBERS) else n} {one if n == 1 else many}"
+
+
+# How each indicator is put into words when it is yellow or red
+SAY = {
+    "unplanned": lambda v: f"a lot of unplanned work ({v:.0%})",
+    "focus": lambda v: "little time for focused work",
+    "switches": lambda v: "many switches between windows",
+    "afterHours": lambda v: f"{v:.1f} h outside working hours",
+    "noBreakDays": lambda v: _count(int(v), "day", "days") + " without a break",
+    "longDays": lambda v: _count(int(v), "long day", "long days"),
+    "meetings": lambda v: f"many meetings ({v:.0%})",
+}
+
+
+def sentence(assessed: dict) -> str:
+    """The week in one sentence: the indicators that stand out, worst first. 'Two long days and little time for
+    focused work.'"""
+    rows = sorted((r for r in assessed["rows"] if r["level"] > 0), key=lambda r: -r["level"])
+    if not rows:
+        return "Nothing stands out."
+    parts = [SAY[r["key"]](r["value"]) for r in rows[:3]]
+    text = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    return text[0].upper() + text[1:] + "."
