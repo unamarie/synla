@@ -171,7 +171,7 @@ def email_text(seal: dict) -> tuple[str, str]:
         day = date.fromisoformat(d["date"])
         extra = f" (outside working hours {d['outsideHours']:.2f} h)" if d.get("outsideHours") else ""
         lines.append(f"{day:%a %d.%m}  {d['hours']:.2f} h{extra}")
-    lines += ["", f"Total {st['totalHours']:.2f} h. Unconfirmed guesses {st['unconfirmedHours']:.2f} h.", ""]
+    lines += ["", f"Total {st['totalHours']:.2f} h. Sorted by Synla on its own {st['unconfirmedHours']:.2f} h.", ""]
     lines += ["Hours per project: " + ", ".join(f"{p} {h:.2f}" for p, h in st["projects"].items()), ""]
     lines += [f"Fingerprint: {seal['fingerprint']}", f"Previous:    {seal['prev']}", "",
               "Keep this email. Its date shows that this record existed this week.",

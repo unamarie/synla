@@ -10,16 +10,20 @@ employer could use to monitor anyone.
 
 *Synla* comes from the Nynorsk *synleg*, "visible".
 
-![Review a day](docs/review-day.png)
+![Today](docs/today.png)
 
 ## What it does
 
-- **Works out what each block of time was for.** It looks at file names, folders, email threads and chat names, not
-  just which app was open. Then it asks you only about the blocks it isn't sure of.
-- **Answer once for the whole day.** "Biggest unsorted windows" lists the windows behind most of the unsorted time.
-  One answer covers every stretch of that window today. A block that mixed two things can be split.
-- **Learns from your answers.** In the demo week, Monday asks about 10 of 19 blocks. By Friday it asks about 1 of 26,
-  and none of the blocks it was sure about were wrong. A window you only glanced at is not learned from.
+- **Synla asks, you tap.** It works out what your time was for from file names, folders, email threads and chat names,
+  not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
+  with its best guess already picked. Press a number for the project, a letter for the kind of work, Enter to save.
+- **A few questions, fewer every day.** Only windows of 5 minutes or more, at most five a day. Smaller things keep
+  Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2, 1 and none on Friday: nine taps for
+  40.5 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same window.
+- **A reminder at the end of the day.** On Windows, a notification 45 minutes before your workday ends, only when
+  there is something to ask and never in the middle of a call. Click it to answer.
+- **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
+  from it.
 - **Keeps meetings.** In a call you don't touch the keyboard, so other trackers count you as away. Synla knows when
   you are in a call and keeps that time.
 - **Makes unplanned work visible.** The weekly summary shows how much time went to helping, firefighting, chasing and
@@ -28,12 +32,12 @@ employer could use to monitor anyone.
 - **Counts time away from the computer.** Add a site visit, a meeting in person or a phone call: from, to, project and
   kind of work. No notes are stored.
 - **Watches your workload before it gets too much.** Seven leading indicators (unplanned work, focus time, switches,
-  hours outside the working day, days without a break, long days, meetings), each green, yellow or red, and a level
-  for the week with the trend over the last eight weeks.
+  hours outside the working day, days without a break, long days, meetings), each green, yellow or red. The week page
+  sums them up in one line, such as "Yellow week. Two long days and little time for focused work."
 - **Keeps a record book.** Each week is sealed with a fingerprint and kept for years, so you can show what you did
   long after the details are gone. See below.
 
-![Week summary](docs/week.png)
+![Week](docs/week.png)
 
 ## Workload indicators
 
@@ -52,7 +56,7 @@ conversation, a dispute.
 ![Record book](docs/record-book.png)
 
 - **What a record holds.** For each day of the week: the stretches of time with start, end, project, kind of work and
-  who decided it (you, time you added, or Synla's guess you never checked), plus totals and the workload numbers.
+  who decided it (you, time you added, or Synla on its own), plus totals and the workload numbers.
   No window names, so nothing about colleagues or customers is kept for years.
 - **Sealed.** Each record gets a fingerprint (SHA-256) made from the record and the fingerprint before it. The records
   form a chain, so changing an old record afterwards breaks it, and `python -m synla verify` shows where.
@@ -94,8 +98,12 @@ with no name. You choose the list in `config.json`. You can pause recording at a
   The record book keeps sealed weeks, with no window names, for 5 years.
 - The **Your data** page shows everything that is stored, and deletes all of it with one click.
 
-**The review page is closed to other websites.** It only answers on 127.0.0.1 and only accepts changes that carry a
-secret from Synla's own page, so a web page you have open cannot read or change your data.
+**Synla's pages are closed to other websites.** They only answer on 127.0.0.1 and only accept changes that carry a
+secret from Synla's own pages, so a web page you have open cannot read or change your data.
+
+**What it changes on Windows.** Three entries under your own user in the registry, no admin rights: start the
+recorder at sign-in, the link `synla:open` that the reminder opens, and the name on the notification.
+`python -m synla autostart off` removes all three.
 
 **Limits, said plainly.**
 - On a computer your employer owns and manages, IT can in principle reach any file, and a domain administrator can
@@ -138,16 +146,17 @@ python -m synla demo
    }
    ```
 
-3. At the end of the day, run `python -m synla`. Answer the biggest unsorted windows first, then the orange blocks,
-   then click **Approve the sure ones**. Add any time away from the computer at the bottom of the day.
-4. On Friday, open **Week summary**: check the workload, use **Timesheet CSV**, then **Seal this week** and
-   **Send to yourself**. Add your private email once, on the **Record book** page.
+3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions. Add any time
+   away from the computer under the day. To see what Synla sorted on its own, click **Check**.
+4. On Friday, open **Week**: read the level for the week, then **Seal this week** and **Send to yourself**. The
+   timesheet is one click away. Add your private email once, on the **Record book** page.
 
 | Command | What it does |
 |---|---|
-| `python -m synla` | Opens the review page for today |
+| `python -m synla` | Opens Synla's pages for today |
 | `python -m synla record` | Runs the recorder in this window (Windows) |
-| `python -m synla autostart on` | Starts the recorder at sign-in; `off` stops that |
+| `python -m synla autostart on` | Starts the recorder at sign-in, with the reminder; `off` stops both |
+| `python -m synla remind` | Shows what the end of day reminder looks like |
 | `python -m synla pause 60` | Pauses recording for 60 minutes; `resume` starts it again |
 | `python -m synla week` | Prints this week's summary as text |
 | `python -m synla export --date 2026-11-02` | Writes that week's timesheet as CSV |
@@ -162,10 +171,11 @@ python -m synla demo
    signals such as "reads like a question", "sounds urgent" or "in a call".
 3. **Guess.** Each clue votes for a project and a kind of work, from your keywords, a few built-in rules and your
    earlier answers. A clue that always meant the same thing counts fully; a clue seen everywhere, such as "Excel",
-   counts for little. Below 70 % confidence, Synla asks you.
-4. **Blocks.** Stretches in a row with the same guess form one block. Short, unclear glances join the block before.
-5. **Quality.** Synla measures how often it was right only on blocks you checked yourself. Bulk approvals don't count
-   as right; if you change one later, it counts as a miss.
+   counts for little. The very same window is trusted after one answer.
+4. **Kind of work.** Learned only from the window itself and its shape (a call, a chat, an email thread), never from
+   topic words, so one answer that a standup was a meeting doesn't make every window about the same project a meeting.
+5. **Questions.** Below 70 % confidence for a window of 5 minutes or more, Synla asks, biggest first, at most five a
+   day. Stretches in a row with the same guess form one block; short, unclear glances join the block before.
 
 Run the tests with `python -m pytest`. They run on Linux and Windows on every push.
 

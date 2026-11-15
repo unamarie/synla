@@ -24,6 +24,7 @@ POLL = 5.0                      # seconds between samples
 GAP = POLL * 3                  # a longer gap (sleep, crash) starts a new row
 PRUNE_EVERY = 3600              # seconds
 SEAL_EVERY = 6 * 3600           # seconds between checks for weeks that should be sealed
+REMIND_EVERY = 60               # seconds between checks for the end of day reminder
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS activity (
     start REAL NOT NULL,        -- seconds since 1970, UTC
@@ -185,12 +186,13 @@ class _Row:
     end: float
 
 
-def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None = None, seal_weeks: bool = True):
+def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None = None, seal_weeks: bool = True,
+        remind: bool = True):
     """The recording loop. polls limits the number of samples (used by tests); None runs until stopped."""
     probe = probe or WindowsProbe()
     db = connect(store)
     last: _Row | None = None
-    last_prune = last_seal = 0.0
+    last_prune = last_seal = last_remind = 0.0
     n = 0
     try:
         while polls is None or n < polls:
@@ -207,6 +209,13 @@ def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None 
                 try:                       # weeks that ended a week ago are sealed even if you never open Synla
                     from .app import Synla
                     Synla(store).auto_seal()
+                except Exception:
+                    pass
+            if remind and now - last_remind > REMIND_EVERY:
+                last_remind = now
+                try:                       # a notification when there are questions about today (notify.py)
+                    from . import notify
+                    notify.maybe_remind(store, probe, config, datetime.fromtimestamp(now).astimezone())
                 except Exception:
                     pass
             state = None
@@ -281,14 +290,47 @@ def stats(store) -> dict:
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
-def autostart_command() -> str:
-    """The command Windows runs at sign-in: pythonw (no window) running the recorder from this folder."""
+def autostart_command(command: str = "record") -> str:
+    """The command Windows runs: pythonw (no window) running Synla from this folder."""
     exe = sys.executable
     w = os.path.join(os.path.dirname(exe), "pythonw.exe")
     exe = w if os.path.exists(w) else exe
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    code = f"import sys;sys.path.insert(0,r'{root}');from synla.__main__ import main;main(['record'])"
+    code = f"import sys;sys.path.insert(0,r'{root}');from synla.__main__ import main;main(['{command}'])"
     return f'"{exe}" -c "{code}"'
+
+
+# The reminder needs two things in your own part of the registry (no admin rights): a name for its notifications,
+# and the link synla:open that a click on the notification opens.
+LINK_KEY = r"Software\Classes\synla"
+NAME_KEY = r"Software\Classes\AppUserModelId\Synla"
+
+
+def register_reminder(on: bool) -> bool:
+    try:
+        _register(on)
+        return True
+    except OSError:
+        return False
+
+
+def _register(on: bool):
+    import winreg
+    hk = winreg.HKEY_CURRENT_USER
+    if on:
+        with winreg.CreateKey(hk, LINK_KEY) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:Synla")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(hk, LINK_KEY + r"\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, autostart_command("open"))
+        with winreg.CreateKey(hk, NAME_KEY) as k:
+            winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, "Synla")
+        return
+    for key in (LINK_KEY + r"\shell\open\command", LINK_KEY + r"\shell\open", LINK_KEY + r"\shell", LINK_KEY, NAME_KEY):
+        try:
+            winreg.DeleteKey(hk, key)
+        except FileNotFoundError:
+            pass
 
 
 def autostart(on: bool):
@@ -301,3 +343,4 @@ def autostart(on: bool):
                 winreg.DeleteValue(k, "Synla")
             except FileNotFoundError:
                 pass
+    register_reminder(on)

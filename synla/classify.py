@@ -21,6 +21,9 @@ from .model import Guess, UNKNOWN
 
 # How much a feature type is worth. A file name or an email subject is a strong clue; the app name is weak.
 TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "folder": 2.5, "is": 1.5, "word": 1.0, "app": 0.6, "ext": 0.3}
+# How many answers a clue needs before it is trusted. The very same window again is trusted after one answer, so
+# Synla does not ask about it twice; a word needs a few.
+TRUST = {"win": 0.5}
 
 # Built-in clues for the kind of work. Learning from the user can override any of these.
 KIND_RULES = {
@@ -31,6 +34,17 @@ KIND_RULES = {
 }
 RULE_WEIGHT = 3.0
 ASK_BELOW = 0.7      # blocks under this confidence are shown first and highlighted
+# The kind of work is learned from the window itself and its shape (a call, a chat, an email thread), never from
+# topic words: one answer that the "Data platform standup" was a meeting must not make every window with "data" in
+# its title a meeting.
+KIND_CLUES = ("win", "file", "subject", "is")
+# The shape of a window (a call, a chat, a reply) says what kind of work it is, not which project.
+NOT_PROJECT_CLUES = ("is",)
+
+
+def counts(target: str, f: str) -> bool:
+    typ = f.split(":", 1)[0]
+    return typ in KIND_CLUES if target == "kind" else typ not in NOT_PROJECT_CLUES
 
 
 def _plain(text: str) -> str:
@@ -63,6 +77,8 @@ class Classifier:
         for f in features(app, title, call):
             c = self.code(f)
             for target, label in (("project", project), ("kind", kind)):
+                if not counts(target, f):
+                    continue
                 votes = self.memory[target][c]
                 votes[label] = votes.get(label, 0.0) + weight
                 if votes[label] <= 0:
@@ -77,6 +93,8 @@ class Classifier:
     def _votes(self, target: str, feats: list) -> tuple[dict, dict]:
         votes, why = defaultdict(float), defaultdict(list)
         for f in feats:
+            if not counts(target, f):
+                continue
             w = TYPE_WEIGHT.get(f.split(":", 1)[0], 1.0)
             seen = self.memory[target].get(self.code(f))
             if seen:
@@ -84,7 +102,7 @@ class Classifier:
                 for label, n in seen.items():
                     share = n / total
                     # more examples make a clue more trustworthy, with diminishing returns
-                    v = w * share * (1 - math.exp(-total / 2))
+                    v = w * share * (1 - math.exp(-total / TRUST.get(f.split(":", 1)[0], 2.0)))
                     votes[label] += v
                     why[label].append((v, f))
             if target == "project":
