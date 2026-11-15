@@ -14,12 +14,16 @@ employer could use to monitor anyone.
 
 ## What it does
 
-- **Synla asks, you tap.** It works out what your time was for from file names, folders, email threads and chat names,
-  not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
+- **Synla asks, you tap.** It works out what your time was for from file names, folders, email threads, chat names
+  and item, order or change numbers, not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
   with its best guess already picked. Press a number for the project, a letter for the kind of work, Enter to save.
 - **A few questions, fewer every day.** Only windows of 5 minutes or more, at most five a day. Smaller things keep
-  Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2, 1 and none on Friday: nine taps for
-  40.5 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same window.
+  Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2, 2 and 1 on Friday: eleven answers
+  for 41.1 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same window.
+- **Asks about time away from the computer.** A meeting in a room, a customer visit, a call on your mobile: when you
+  were away for 30 minutes or more, starting and ending inside your workday, Synla asks what it was. "Not work" is
+  enough, and Synla never asks why. It never asks about mornings, evenings, weekends, lunch or paused time, and after
+  two "Not work" answers at the same time of day it stops asking about that break.
 - **A reminder at the end of the day.** On Windows, a notification 45 minutes before your workday ends, only when
   there is something to ask and never in the middle of a call. Click it to answer.
 - **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
@@ -36,6 +40,8 @@ employer could use to monitor anyone.
   sums them up in one line, such as "Yellow week. Two long days and little time for focused work."
 - **Keeps a record book.** Each week is sealed with a fingerprint and kept for years, so you can show what you did
   long after the details are gone. See below.
+
+![Time away from the computer](docs/away.png)
 
 ![Week](docs/week.png)
 
@@ -85,7 +91,13 @@ app is using the microphone, so calls are not counted as away.
 **What it never records.** Keystrokes, screenshots, the clipboard, file contents, sound or web addresses.
 
 **Private windows.** Password managers, private browsing, online banking and health sites are stored as "Private",
-with no name. You choose the list in `config.json`. You can pause recording at any time.
+with no name. You choose the list in `config.json`.
+
+**Paused means paused.** You can pause recording at any time. Synla keeps only when each pause started and ended, never
+asks about that time, and hides anything ActivityWatch recorded during it.
+
+**Time away stays yours.** Questions about time away only cover your workday, and "Not work" keeps nothing but the
+time. Turn the questions off on the **Your data** page.
 
 **Protected and short-lived.**
 - Data lives in `%LOCALAPPDATA%\Synla`, which stays on your computer: it is not part of a roaming profile and is not
@@ -142,12 +154,15 @@ python -m synla demo
    ```json
    "projects": {
      "Data platform": {"keywords": ["lakehouse", "pipeline"]},
+     "Gearbox G2": {"keywords": ["gearbox", "4500-"]},
      "Internal": {"keywords": ["timesheet"]}
    }
    ```
 
-3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions. Add any time
-   away from the computer under the day. To see what Synla sorted on its own, click **Check**.
+   Keywords can be numbers: `"4500-"` matches every item number that starts with 4500, in ERP and PLM screens too.
+
+3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions, including
+   the ones about time away from the computer. To see what Synla sorted on its own, click **Check**.
 4. On Friday, open **Week**: read the level for the week, then **Seal this week** and **Send to yourself**. The
    timesheet is one click away. Add your private email once, on the **Record book** page.
 
@@ -167,21 +182,25 @@ python -m synla demo
 ## How it decides
 
 1. **Segments.** Window activity with away time cut out. Calls keep their time, up to two hours without input.
-2. **Clues.** Each window title is split into clues: the exact window, file name, folder, email subject, words, and
-   signals such as "reads like a question", "sounds urgent" or "in a call".
+2. **Clues.** Each window title is split into clues: the exact window, file name, folder, email subject, numbers such
+   as 4500-1203 or ECR-2026-0153, words, and signals such as "reads like a question", "sounds urgent" or "in a call".
+   Years, dates, times and versions are not counted as numbers.
 3. **Guess.** Each clue votes for a project and a kind of work, from your keywords, a few built-in rules and your
    earlier answers. A clue that always meant the same thing counts fully; a clue seen everywhere, such as "Excel",
    counts for little. The very same window is trusted after one answer.
 4. **Kind of work.** Learned only from the window itself and its shape (a call, a chat, an email thread), never from
    topic words, so one answer that a standup was a meeting doesn't make every window about the same project a meeting.
 5. **Questions.** Below 70 % confidence for a window of 5 minutes or more, Synla asks, biggest first, at most five a
-   day. Stretches in a row with the same guess form one block; short, unclear glances join the block before.
+   day, together with time away from the computer. Stretches in a row with the same guess form one block; short,
+   unclear glances join the block before.
 
 Run the tests with `python -m pytest`. They run on Linux and Windows on every push.
 
 ## Next
 
-- Planned vs actual: compare against a calendar export.
+- Words for each role: labels and limits that fit sales, product owners and leaders, and "Travel" as a kind of work.
+- Calendar: Outlook meetings could fill in time away on their own, once other people's meeting titles can be kept
+  private.
 - Rules you can see and edit: "files in this folder belong to this project".
 - Warnings during the week, when an indicator turns red, not only in the week summary.
 

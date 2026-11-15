@@ -89,6 +89,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .dot.green{background:var(--green)}.dot.yellow{background:var(--amber)}.dot.red{background:var(--red)}.dot.big{width:16px;height:16px;margin-top:4px}
 .timeline{margin:6px 0 4px}.track{position:relative;height:30px;background:var(--track);border-radius:8px;overflow:hidden}
 .seg{position:absolute;top:0;bottom:0}
+.seg.asked{background:color-mix(in srgb,var(--sun) 10%,transparent);outline:2px dashed var(--sun);outline-offset:-2px;border-radius:6px}
 .uns{background:repeating-linear-gradient(45deg,var(--sun) 0 4px,var(--hatch) 4px 8px)!important}
 .ticks{position:relative;height:18px;font-size:.72rem;color:var(--muted)}.tick{position:absolute;transform:translateX(-50%);top:3px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.9rem;margin:6px 0 26px;color:var(--muted)}
@@ -109,6 +110,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip:hover{border-color:var(--muted)}
 .chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px var(--c)}
 .chip.ghost{color:var(--muted);border-style:dashed;padding-left:14px}
+.gap.isnotwork .kinds{opacity:.35;pointer-events:none}
 .chip .sw{width:10px;height:10px;border-radius:50%}
 .newp input{font:inherit;font-size:.95rem;border:1.5px solid var(--sea);border-radius:999px;padding:6px 14px;background:var(--surface);color:var(--ink);width:200px}
 .key{font-size:.72rem;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;background:var(--paper);min-width:18px;text-align:center}
@@ -214,10 +216,23 @@ function toast(msg,undo){
  const t=$('#toast');$('.msg',t).textContent=msg;const b=$('button',t);b.hidden=!undo;b.dataset.undo=undo||'';
  t.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>t.classList.remove('show'),undo?10000:5000);
 }
-function pick(c){if(!c)return;$$('.chip[data-v]',c.parentElement).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)})}
+function pick(c){if(!c)return;$$('.chip[data-v]',c.parentElement).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)});
+ const g=c.closest('.gap');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'))}
 function choose(box,sel,v){const c=$$(sel+' .chip[data-v]',box).find(x=>x.dataset.v===v);if(c)pick(c);else $$(sel+' .chip',box).forEach(x=>x.classList.remove('on'))}
 const active=()=>{const e=$('#editor');return e&&!e.hidden?e:$('.ask.q')};
+async function saveGap(card){
+ const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
+ if(!p){toast('Pick a project, or Not work.');return}
+ const body={date:card.dataset.date,code:card.dataset.code};
+ if(p.hasAttribute('data-notwork'))body.notWork=true;
+ else{if(!k){toast('Pick a kind of work.');return}
+  Object.assign(body,{project:p.dataset.v,kind:k.dataset.v,start:$('.from',card).value,end:$('.to',card).value})}
+ const res=await post('/api/gap',body);if(!res)return;
+ await refresh();
+ toast(body.notWork?'Saved: not work.':'Saved: '+body.project+', '+k.dataset.label.toLowerCase()+', '+body.start+' to '+body.end+'.',res.undo);
+}
 async function save(card){
+ if(card.dataset.type==='gap')return saveGap(card);
  const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
  if(!p){toast('Pick a project first.');return}
  if(!k){toast('Pick a kind of work.');return}
@@ -288,15 +303,18 @@ document.addEventListener('click',async e=>{
   if(b.dataset.copy==='tsv'){const sep=(1.5).toLocaleString().charAt(1);t=t.replace(/(\d)\.(\d)/g,'$1'+sep+'$2')}
   await navigator.clipboard.writeText(t);toast('Copied.');return}
  if(b=on('[data-saveemail]')){if(await post('/api/settings',{recordEmail:$('#email').value})){await refresh();toast('Saved.')}return}
+ if(b=on('[data-gaps]')){if(await post('/api/settings',{askAboutGaps:b.dataset.gaps==='1'})){await refresh();toast(b.dataset.gaps==='1'?'Synla asks about time away again.':'No more questions about time away.')}return}
  if(b=on('[data-delete]')){if(confirm(b.dataset.confirm)&&await post('/api/delete',{what:b.dataset.delete})){await refresh();toast('Deleted.')}return}
  if(b=on('[data-print]')){window.print();return}
 });
 document.addEventListener('keydown',e=>{
  if(e.metaKey||e.ctrlKey||e.altKey)return;
  const m=$('#menu');if(e.key==='Escape'&&m&&m.open){m.open=false;return}
+ if(e.key==='Enter'&&e.target.matches('.ask.q .times input')){e.preventDefault();save(e.target.closest('.ask'));return}
  if(e.target.closest('input,textarea,select'))return;
  const card=active();if(!card)return;const k=e.key.toLowerCase();
- if(/^[1-9]$/.test(k)){pick($$('.chips.p .chip[data-v]',card)[+k-1]);e.preventDefault();return}
+ if(/^[1-9]$/.test(k)){pick($$('.chips.p .chip[data-v]:not([data-notwork])',card)[+k-1]);e.preventDefault();return}
+ if(k==='0'){pick($('.chips.p [data-notwork]',card));e.preventDefault();return}
  const i=k.length===1?'qwertyu'.indexOf(k):-1;
  if(i>=0){pick($$('.chips.k .chip[data-v]',card)[i]);e.preventDefault();return}
  if(e.key==='Enter'&&(e.target===document.body||e.target.closest('.chip'))){e.preventDefault();save(card);return}
@@ -386,6 +404,7 @@ def why(g) -> str:
         for start, words in (("keyword in", "from the words in the title"), ("word ", "from the words in the title"),
                              ("file ", "from the file name"), ("same email thread", "from the email thread"),
                              ("folder ", "from the folder"), ("same window as before", "from your earlier answers"),
+                             ("number ", "from the number in the title"),
                              ("app ", "from the app")):
             if r.startswith(start):
                 return ", " + words
@@ -434,7 +453,7 @@ def page(app, title: str, body: str, token: str, here: str = "") -> str:
 
 
 # ---- today -----------------------------------------------------------------------------------------------------------
-def timeline(app, d: date, bl: list) -> str:
+def timeline(app, d: date, bl: list, asked: tuple | None = None) -> str:
     ws, we = app.workday
     start_h, end_h = int(ws[:2]), int(we[:2]) + (1 if we[3:5] != "00" else 0)
     segs = [s for b in bl for s in b.segments]
@@ -453,6 +472,10 @@ def timeline(app, d: date, bl: list) -> str:
             w = min(100 - x, max(0.3, s.minutes * 60 / span * 100))
             tip = f"{s.start:%H:%M} to {s.end:%H:%M} · {shown(s.title, s.app)} · {'not sorted yet' if cls != 'seg' else project_of(b)}"
             bars.append(f"<span class='{cls}' style='left:{x:.2f}%;width:{w:.2f}%;background:{c}' title='{escape(tip, quote=True)}'></span>")
+    if asked:                                  # the time away Synla is asking about right now
+        x = max(0.0, (asked[0] - t0).total_seconds() / span * 100)
+        w = min(100 - x, (asked[1] - asked[0]).total_seconds() / span * 100)
+        bars.append(f"<span class='seg asked' style='left:{x:.2f}%;width:{w:.2f}%' title='Asked about below'></span>")
     every = 1 if h1 - h0 <= 14 else 2
     ticks = "".join(f"<span class='tick' style='left:{(h - h0) / (h1 - h0) * 100:.2f}%'>{h:02d}</span>"
                     for h in range(h0, h1 + 1, every))
@@ -487,6 +510,26 @@ def ask_card(app, d: date, q: dict) -> str:
 <div class='row'><span class='lab'>Project</span><div class='chips p'>{project_chips(app, known, first=known)}</div></div>
 <div class='hint'>{hint}</div>
 <div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(g.kind if g.kind in KINDS else "project")}</div></div>
+<div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
+<button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
+
+
+def gap_card(app, d: date, q: dict) -> str:
+    it = q["items"][0]
+    n = len(q["items"])
+    a, b = it["start"], it["end"]
+    dots = "".join(f"<i class='{'on' if i == 0 else ''}'></i>" for i in range(min(n, 8)))
+    notwork = ("<button type='button' class='chip' aria-pressed='false' data-v='' data-notwork><span class='key'>0</span>"
+               "Not work</button>")
+    return f"""<section class='ask q gap' data-type='gap' data-date='{d}' data-asked='1' data-code='{escape(it["code"])}'>
+<div class='askhead'><span>{COUNT.get(n, f"{n} quick questions")}</span><span class='prog'>{dots}</span></div>
+<h2>What was this?</h2><div class='what'>Away from the computer</div>
+<div class='meta'>{hm(it["minutes"])} · {a:%H:%M} to {b:%H:%M}</div>
+<div class='row'><span class='lab'>Project</span><div class='chips p'>{notwork}{project_chips(app)}</div></div>
+<div class='hint'>Not work is enough. Synla never asks why, and keeps only the time.</div>
+<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips("meeting")}</div></div>
+<div class='row kinds'><span class='lab'>When</span><div class='times'><input type='time' class='from' value='{a:%H:%M}'
+aria-label='From'> to <input type='time' class='to' value='{b:%H:%M}' aria-label='To'></div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
 <button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
 
@@ -575,13 +618,19 @@ def today_page(app, d: date, token: str) -> str:
     head = (f"<div class='dayhead'><div><div class='date'><a class='step' href='/day?date={prev}' aria-label='Previous day'>‹</a>"
             f"{day_title(d)}<a class='step{' off' if nxt > app.last_day() else ''}' href='/day?date={nxt}' aria-label='Next day'>›</a>"
             f"</div><div class='big'>{hm(nums['total']) if bl else '0 h'}</div></div>{wl}</div>")
-    card = ask_card(app, d, q) if q["items"] else done_card(app, d, q, nums, bl)
+    if q["items"]:
+        card = (gap_card if q["items"][0]["type"] == "gap" else ask_card)(app, d, q)
+    else:
+        card = done_card(app, d, q, nums, bl)
     check = ""
     if bl:
         label = (f"Synla sorted {hm(nums['sure'])} on its own. Check ›" if nums["sure"] >= 1 else "See the whole day ›")
         check = f"<button class='link' data-toggle='check'>{label}</button>"
     quiet = f"<div class='quiet'>{check or '<span></span>'}<button class='link' data-toggle='away'>+ Time away from the computer</button></div>"
-    body = head + (timeline(app, d, bl) if bl else "") + card + quiet + (check_section(app, d, bl) if bl else "") + away_section(app, d)
+    first = q["items"][0] if q["items"] else None
+    asked = (first["start"], first["end"]) if first and first["type"] == "gap" else None
+    body = (head + (timeline(app, d, bl, asked) if bl else "") + card + quiet + (check_section(app, d, bl) if bl else "")
+            + away_section(app, d))
     return page(app, "Today" if d == app.today() else day_title(d), body, token, "today" if d == app.today() else "")
 
 
@@ -919,10 +968,16 @@ def data_page(app, token: str) -> str:
 <button class='btn' data-pause='rest'>Pause until tomorrow</button><button class='btn' data-pause='0'>Resume</button></div>
 <p class='note'>Microphone check for calls: {'on' if i['detectCalls'] else 'off'}. Synla only asks Windows whether an app is
 using the microphone, never what is said.</p></section>
+<section class='panel'><h3>Questions about time away: {'on' if i['askAboutGaps'] else 'off'}</h3>
+<p class='note'>When you are away from the computer for 30 minutes or more, starting and ending inside your workday, Synla
+asks what it was. Never about mornings, evenings, weekends, lunch or paused time. Not work is enough, and Synla never asks
+why.</p><div class='buttons'><button class='btn' data-gaps='{0 if i['askAboutGaps'] else 1}'>{'Turn off' if i['askAboutGaps'] else 'Turn on'}</button></div></section>
 <section class='panel'><h3>What is stored</h3><table><tr><th>What</th><th class='num'>Amount</th><th>Oldest</th><th>Kept for</th></tr>
 <tr><td>Window names and times from the recorder</td><td class='num'>{i['recorder_rows']:,}</td><td class='nw'>{_when(i['recorder_first'])}</td><td>{i['keepWindowDays']} days</td></tr>
 <tr><td>Your answers: project and kind for each stretch of time</td><td class='num'>{i['answers']:,}</td><td class='nw'>{_when(i['answers_first'])}</td><td>{i['keepDays']} days</td></tr>
 <tr><td>Time you added away from the computer (no notes)</td><td class='num'>{i['added']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
+<tr><td>Answers about time away: when, and whether it was work. Never why</td><td class='num'>{i['away']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
+<tr><td>Pauses: when each started and ended, so Synla never asks about them</td><td class='num'>{i['pauses']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Answer log: what you answered and what Synla had guessed</td><td class='num'>{i['log_entries']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Learned clues, stored as one-way codes, not readable names</td><td class='num'>{i['clues']:,}</td><td></td><td>until you delete them</td></tr>
 <tr><td>Record book: sealed weeks with times, projects and kinds, no window names</td><td class='num'>{i['seals']:,}</td><td class='nw'>{_when(datetime.fromisoformat(i['seals_first'])) if i['seals_first'] else 'nothing yet'}</td><td>{i['keepRecordYears']:g} years</td></tr></table>
@@ -1052,7 +1107,16 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     count = app.approve_confident(date.fromisoformat(body["date"]))
                     return self._json({"ok": True, "undo": app.last_undo, "count": count})
                 if path == "/api/skip":
-                    app.skip(date.fromisoformat(body["date"]), str(body.get("code", ""))[:32])
+                    app.skip(date.fromisoformat(body["date"]), str(body.get("code", ""))[:64])
+                    return self._json({"ok": True, "undo": app.last_undo})
+                if path == "/api/gap":
+                    d, code = date.fromisoformat(body["date"]), str(body.get("code", ""))[:64]
+                    if body.get("notWork"):
+                        app.gap_not_work(d, code)
+                    else:
+                        if not body.get("project") or body.get("kind") not in KINDS:
+                            return self._send(400, "Pick a project and a kind of work, or Not work.", "text/plain")
+                        app.answer_gap(d, code, body.get("start", ""), body.get("end", ""), body["project"], body["kind"])
                     return self._json({"ok": True, "undo": app.last_undo})
                 if path == "/api/more":
                     app.ask_more(date.fromisoformat(body["date"]))
@@ -1081,11 +1145,14 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     s = app.seal(date.fromisoformat(body["week"]))
                     return self._json({"ok": True, "fingerprint": s["fingerprint"]})
                 elif path == "/api/settings":
-                    email = (body.get("recordEmail") or "").strip()
-                    if email and not EMAIL.match(email):
-                        return self._send(400, "That does not look like an email address.", "text/plain")
                     c = app.store.config()
-                    c["recordEmail"] = email
+                    if "recordEmail" in body:
+                        email = (body.get("recordEmail") or "").strip()
+                        if email and not EMAIL.match(email):
+                            return self._send(400, "That does not look like an email address.", "text/plain")
+                        c["recordEmail"] = email
+                    if "askAboutGaps" in body:
+                        c["askAboutGaps"] = bool(body["askAboutGaps"])
                     app.store.save_config(c)
                     app.reload()
                 elif path == "/api/delete":

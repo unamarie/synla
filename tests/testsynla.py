@@ -4,7 +4,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -51,9 +51,19 @@ def app(tmp_path):
     return Synla(store)
 
 
+GAP_TRUTH = ("Supplier audit", "meeting")        # the made-up week's meeting in a room, Thursday afternoon
+
+
+def answer_gap(app, d, g, project="Supplier audit", kind="meeting"):
+    return app.answer_gap(d, g["code"], f"{g['start']:%H:%M}", f"{g['end']:%H:%M}", project, kind)
+
+
 def answer_all(app, d):
     for b in app.day(d):
-        app.answer_block(d, b.id, *truth(b.main.title))
+        if b.main.app != MANUAL_APP:
+            app.answer_block(d, b.id, *truth(b.main.title))
+    for g in app.gaps(d):
+        answer_gap(app, d, g, *GAP_TRUTH)
 
 
 def ev(t, minutes, **data):
@@ -108,6 +118,8 @@ def guessed_right(app, days):
     for d in days:
         for b in app.day(d):
             for s in b.segments:
+                if s.app == MANUAL_APP:          # time you added yourself is yours, not a guess
+                    continue
                 total += s.minutes
                 right += s.minutes * ((b.guess.project, b.guess.kind) == truth(s.title))
     return right / total
@@ -398,7 +410,8 @@ def test_a_sealed_week_checks_out_and_tampering_shows(app):
     assert s["data"]["unconfirmedHours"] == 0 and "Window" not in s["statement"]
     db = __import__("sqlite3").connect(app.store.dir / "record.db")
     with db:
-        db.execute("UPDATE seals SET statement = replace(statement, '\"totalHours\":40.5', '\"totalHours\":30.5')")
+        db.execute("UPDATE seals SET statement = replace(statement, ?, ?)",
+                   (f'"totalHours":{json.dumps(s["data"]["totalHours"])}', '"totalHours":30.5'))
     db.close()
     v = app.record.verify()
     assert not v["ok"] and "changed after it was sealed" in v["problems"][0]
@@ -529,7 +542,10 @@ def answer_questions(app, d):
     n = 0
     while app.questions(d)["items"]:
         it = app.questions(d)["items"][0]
-        app.answer(d, it["ids"], *truth(it["title"]), how="window", asked=True)
+        if it["type"] == "gap":
+            answer_gap(app, d, it, *GAP_TRUTH)
+        else:
+            app.answer(d, it["ids"], *truth(it["title"]), how="window", asked=True)
         n += 1
     return n
 
@@ -537,8 +553,8 @@ def answer_questions(app, d):
 def test_synla_asks_about_a_few_big_windows_and_less_every_day(app):
     q = app.questions(MONDAY.date())
     assert len(q["items"]) == 5                                     # a new user: at most five questions
-    assert all(it["unsure"] >= 5 for it in q["items"])
-    assert [it["unsure"] for it in q["items"]] == sorted((it["unsure"] for it in q["items"]), reverse=True)
+    assert all(it["size"] >= 5 for it in q["items"])
+    assert [it["size"] for it in q["items"]] == sorted((it["size"] for it in q["items"]), reverse=True)
     asked = [answer_questions(app, (MONDAY + timedelta(days=i)).date()) for i in range(5)]
     print(f"\nquestions per day, Monday to Friday: {asked}")
     assert asked[0] == 5 and sum(asked[1:]) <= 6 and asked[4] <= 1
@@ -571,7 +587,10 @@ def test_the_daily_limit_and_asking_for_more(app):
     app.reload()
     for _ in range(5):
         it = app.questions(d)["items"][0]
-        app.answer(d, it["ids"], "Internal", "admin", how="window", asked=True)
+        if it["type"] == "gap":
+            answer_gap(app, d, it, "Internal", "meeting")
+        else:
+            app.answer(d, it["ids"], "Internal", "admin", how="window", asked=True)
     q = app.questions(d)
     assert q["items"] == [] and q["waiting"] > 0
     app.ask_more(d)
@@ -639,3 +658,123 @@ def test_the_end_of_day_reminder(app):
     assert 'launch="synla:open"' in xml
     script = base64.b64decode(notify.command(xml)[-1]).decode("utf-16-le")
     assert "CreateToastNotifier('Synla')" in script and "5 quick questions" in script
+
+
+# ---- numbers as clues ------------------------------------------------------------------------------------------------
+def test_item_order_and_change_numbers_are_clues():
+    from synla.context import numbers
+    assert numbers("Display Material 4500-1203") == ["4500-1203"]
+    assert numbers("ECR-2026-0153 Gearbox housing material change") == ["ecr-2026-0153"]
+    assert numbers("RE: Delivery date castings PO 778812") == ["778812"]
+    assert numbers("RE: Seal kit for pump P-45, when?") == ["p-45"]
+    for plain in ("Budget 2027 v7.xlsx", "Board pack Q4.pptx", "1:1 Kari", "Meeting 15.11.2026 10:15", "Report 2026-11-15",
+                  "Price 12.50", "Python 3.10.12", "Inbox (3)", "Week 45", "Sheet2", "Inbox - ola123@example.com"):
+        assert numbers(plain) == [], plain
+    assert "id:5523019" in features("ifs.exe", "Customer Order 5523019 - IFS Cloud")
+
+
+def test_a_number_links_windows_and_keywords_can_match_it():
+    from synla.classify import Classifier
+    c = Classifier({"projects": {"Gearbox G2": {"keywords": ["gearbox"]}, "Internal": {"keywords": []}}}, {}, lambda s: s)
+    assert c.guess("saplogon.exe", "Display Material 4500-1203").project == "?"
+    c.learn("EXCEL.EXE", "BOM 4500-1203 rev C.xlsx - Excel", "Gearbox G2", "project")
+    g = c.guess("saplogon.exe", "Display Material 4500-1203")
+    assert g.project == "Gearbox G2" and g.reasons[0] == 'number "4500-1203"'
+    family = Classifier({"projects": {"Gearbox G2": {"keywords": ["4500-"]}}}, {}, lambda s: s)
+    assert family.guess("saplogon.exe", "Display Material 4500-7777").project == "Gearbox G2"
+
+
+def test_an_opened_email_is_the_same_thread_as_in_the_inbox():
+    a = features("OUTLOOK.EXE", "RE: Seal kit for pump P-45, when? - Message (HTML)")
+    b = features("OUTLOOK.EXE", "SV: Seal kit for pump P-45, when? - Melding (HTML)")
+    assert "subject:seal kit for pump p-45, when?" in a and "subject:seal kit for pump p-45, when?" in b
+
+
+# ---- time away from the computer -------------------------------------------------------------------------------------
+def away_days(tmp_path, days, gap=(9, 10)):
+    """A plain store: work 08:00 to 16:00 on the given days, away from gap[0] to gap[1] o'clock."""
+    win = []
+    for d in days:
+        t = MONDAY + timedelta(days=d)
+        win.append(ev(t.replace(hour=8), (gap[0] - 8) * 60, app="EXCEL.EXE", title="Budget 2027.xlsx - Excel"))
+        win.append(ev(t.replace(hour=gap[1]), (16 - gap[1]) * 60, app="EXCEL.EXE", title="Budget 2027.xlsx - Excel"))
+    (tmp_path / "away.json").write_text(json.dumps({"window": win, "afk": []}))
+    store = Store(tmp_path / "s")
+    store.save_config(dict(demo.DEMO_CONFIG, source=str(tmp_path / "away.json")))
+    return Synla(store)
+
+
+def test_a_meeting_in_a_room_becomes_a_question(app):
+    thursday = (MONDAY + timedelta(days=3)).date()
+    gap = next(it for it in app.questions(thursday)["items"] if it["type"] == "gap")
+    assert 70 <= gap["minutes"] <= 80                       # the supplier meeting, 75 minutes
+    assert not app.gaps(MONDAY.date())                      # lunch, and leaving at 16:20 for the evening: not asked
+    start = answer_gap(app, thursday, gap, *GAP_TRUTH)
+    assert not app.gaps(thursday)
+    added = next(b for b in app.day(thursday) if b.main.app == MANUAL_APP)
+    assert (added.guess.project, added.guess.kind, added.confirmed) == ("Supplier audit", "meeting", True)
+    assert any(x["by"] == "added" for day in app.statement(MONDAY.date())["days"] for x in day["stretches"])
+    app.undo(app.last_undo)
+    assert not any(b.main.app == MANUAL_APP for b in app.day(thursday)) and app.gaps(thursday)
+    assert start
+
+
+def test_a_shorter_answer_does_not_ask_again_about_the_rest(app):
+    thursday = (MONDAY + timedelta(days=3)).date()
+    gap = app.gaps(thursday)[0]
+    end = (gap["start"] + timedelta(minutes=30)).strftime("%H:%M")
+    app.answer_gap(thursday, gap["code"], f"{gap['start']:%H:%M}", end, "Supplier audit", "meeting")
+    assert not app.gaps(thursday)
+
+
+def test_not_work_is_enough_and_keeps_no_reason(tmp_path):
+    a = away_days(tmp_path, [0, 1, 2])
+    mon, tue, wed = (MONDAY + timedelta(days=i) for i in range(3))
+    g = a.gaps(mon.date())[0]
+    assert (g["start"].hour, g["minutes"]) == (9, 60)
+    a.gap_not_work(mon.date(), g["code"])
+    assert not a.gaps(mon.date()) and not a.store.manual()
+    kept = a.store.day_state(mon.date())["away"]
+    assert kept == [[kept[0][0], kept[0][1], "break"]]      # when, and that it was not work: nothing else
+    a.gap_not_work(tue.date(), a.gaps(tue.date())[0]["code"])
+    assert not a.gaps(wed.date())                           # twice is a habit: Synla stops asking
+
+
+def test_paused_time_is_never_asked_about_or_shown(tmp_path):
+    a = away_days(tmp_path, [0], gap=(9, 10))
+    p0 = (MONDAY + timedelta(hours=9, minutes=15)).astimezone(timezone.utc)
+    paused = [[p0.isoformat(), (p0 + timedelta(minutes=30)).isoformat()],
+              [(p0 + timedelta(hours=3)).isoformat(), (p0 + timedelta(hours=4)).isoformat()]]
+    a.store._write("pause.json", {"until": None, "history": paused})
+    a.reload()
+    assert not a.gaps(MONDAY.date())                        # the gap overlaps a pause
+    segs = [s for b in a.day(MONDAY.date()) for s in b.segments]
+    assert not any(s.start < p0 + timedelta(hours=4) and p0 + timedelta(hours=3) < s.end for s in segs)
+
+
+def test_no_questions_about_time_away_when_turned_off_or_before_this_version(tmp_path, app):
+    a = away_days(tmp_path, [0])
+    c = a.store.config()
+    c["askAboutGaps"] = False
+    a.store.save_config(c)
+    a.reload()
+    assert not a.gaps(MONDAY.date())
+    app.config["source"] = "auto"                           # the real recorder: older days are never asked about
+    assert app.store.gaps_since() == date.today().isoformat()
+    assert not app.gaps((MONDAY + timedelta(days=3)).date())
+
+
+def test_time_away_over_http(app, server):
+    base, _ = server
+    thursday = (MONDAY + timedelta(days=3)).date()
+    first = app.questions(thursday)["items"][0]                     # a bigger window comes first
+    assert first["type"] == "window" and post(f"{base}/api/skip", {"date": str(thursday), "code": first["code"]}, OK) == 200
+    assert "Away from the computer" in LOCAL.open(f"{base}/day?date={thursday}").read().decode()
+    gap = app.gaps(thursday)[0]
+    status, reply = post_json(f"{base}/api/gap", {"date": str(thursday), "code": gap["code"], "notWork": True}, OK)
+    assert status == 200 and reply["undo"] and not app.gaps(thursday)
+    assert post(f"{base}/api/undo", {"token": reply["undo"]}, OK) == 200
+    body = {"date": str(thursday), "code": gap["code"], "project": "Supplier audit", "kind": "meeting",
+            "start": f"{gap['start']:%H:%M}", "end": f"{gap['end']:%H:%M}"}
+    assert post(f"{base}/api/gap", body, OK) == 200 and not app.gaps(thursday)
+    assert post(f"{base}/api/settings", {"askAboutGaps": False}, OK) == 200 and app.config["askAboutGaps"] is False

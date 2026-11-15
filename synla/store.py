@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "keepRecordYears": 5,      # the record book: sealed weeks with times, projects and kinds, no window names
     "weeklyHours": 37.5,       # your normal week, to show hours above it
     "recordEmail": "",         # your private address, for sending each week's fingerprint to yourself
+    "askAboutGaps": True,      # ask what longer time away from the computer was; "Not work" is always an answer
     "indicators": {},          # your own yellow and red limits, e.g. {"switches": [20, 40]}
     "source": "auto",          # auto, synla, activitywatch, or a path to a JSON file (the demo)
     "activityWatchUrl": "http://localhost:5600",
@@ -172,8 +173,36 @@ class Store:
         return t if t and t > datetime.now(timezone.utc) else None
 
     def pause(self, minutes: float | None):
-        until = datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
-        self._write("pause.json", {"until": until.isoformat() if until else None})
+        """Pause for some minutes, or resume with None. Each pause is kept as a start and an end, so Synla never asks
+        about paused time and never shows what another program recorded then."""
+        now = datetime.now(timezone.utc)
+        p = self._read("pause.json", {})
+        history = [list(h) for h in p.get("history", [])]
+        active = self.paused_until() is not None and history
+        if minutes:
+            until = now + timedelta(minutes=minutes)
+            if active:
+                history[-1][1] = until.isoformat()
+            else:
+                history.append([now.isoformat(), until.isoformat()])
+        else:
+            until = None
+            if active:
+                history[-1][1] = now.isoformat()
+        self._write("pause.json", {"until": until.isoformat() if until else None, "history": history})
+
+    def pauses(self) -> list:
+        return [(datetime.fromisoformat(a), datetime.fromisoformat(b))
+                for a, b in self._read("pause.json", {}).get("history", [])]
+
+    def gaps_since(self) -> str:
+        """The first day Synla could ask about time away. Days before that are never asked about, because pauses
+        before then were not kept."""
+        v = self._read("since.json", {}).get("gaps")
+        if not v:
+            v = datetime.now().date().isoformat()
+            self._write("since.json", {"gaps": v})
+        return v
 
     # ---- retention ---------------------------------------------------------------------------------------------
     def forget(self, keep_days: int):
@@ -191,6 +220,10 @@ class Store:
         keep_days_state = {k: v for k, v in days.items() if k >= cutoff.date().isoformat()}
         if len(keep_days_state) != len(days):
             self.save_days(keep_days_state)
+        p = self._read("pause.json", {})
+        history = [h for h in p.get("history", []) if datetime.fromisoformat(h[1]) >= cutoff]
+        if len(history) != len(p.get("history", [])):
+            self._write("pause.json", dict(p, history=history))
         log = self.corrections()
         recent = [e for e in log if datetime.fromisoformat(e["at"]) >= cutoff]
         if len(recent) != len(log):
@@ -201,7 +234,7 @@ class Store:
     def delete_everything(self, record_book: bool = False):
         """Removes Synla's data. The record book only when asked. Your settings (config.json) stay."""
         names = ["decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json", "manual.json",
-                 "days.json", "reminded.json", "activity.db", "activity.db-wal", "activity.db-shm"]
+                 "days.json", "reminded.json", "since.json", "activity.db", "activity.db-wal", "activity.db-shm"]
         if record_book:
             names += ["record.db", "record.db-wal", "record.db-shm"]
         for name in names:
