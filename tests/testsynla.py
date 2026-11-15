@@ -778,3 +778,65 @@ def test_time_away_over_http(app, server):
             "start": f"{gap['start']:%H:%M}", "end": f"{gap['end']:%H:%M}"}
     assert post(f"{base}/api/gap", body, OK) == 200 and not app.gaps(thursday)
     assert post(f"{base}/api/settings", {"askAboutGaps": False}, OK) == 200 and app.config["askAboutGaps"] is False
+
+
+# ---- what a window is, its stretches, and what keeps coming back -----------------------------------------------------
+def test_outlook_windows_say_what_they_are():
+    from synla.context import outlook_item
+    from synla.server import where
+    assert outlook_item("OUTLOOK.EXE", "URGENT: Invoice export failed - Message (HTML)") == "email"
+    assert outlook_item("OUTLOOK.EXE", "Leveringsdato - Melding (HTML)") == "email"
+    assert outlook_item("OUTLOOK.EXE", "Weekly status - Meeting") == "invite"
+    assert outlook_item("OUTLOOK.EXE", "Statusmøte - Møte") == "invite"
+    assert outlook_item("OUTLOOK.EXE", "Calendar - me@example.com - Outlook") == "calendar"
+    assert outlook_item("OUTLOOK.EXE", "Inbox - Outlook") == "inbox"
+    assert where("OUTLOOK.EXE", "URGENT: Invoice export failed - Message (HTML)") == "Email in Outlook"
+    assert where("EXCEL.EXE", "Budget 2027.xlsx - Excel") == "Excel"
+    f = features("OUTLOOK.EXE", "URGENT: Invoice export failed - Message (HTML)")
+    assert "subject:urgent: invoice export failed" in f       # a new email has a thread too, not only replies
+
+
+def test_the_word_meeting_is_a_meeting_only_in_a_meeting_app():
+    assert "is:meeting" in features("ms-teams.exe", "Weekly status meeting | Microsoft Teams")
+    assert "is:meeting" not in features("OUTLOOK.EXE", "RE: meeting notes - Message (HTML)")
+    assert "is:meeting" not in features("msedge.exe", "Pull request review - Microsoft Edge")
+    invite = features("OUTLOOK.EXE", "Weekly status - Meeting")
+    assert "is:invite" in invite and "is:meeting" not in invite
+    assert "is:meeting" in features("chrome.exe", "Anything at all", call=True)   # a real call always counts
+
+
+def test_the_question_shows_each_stretch(app):
+    from synla.server import when_text
+    it = next(i for i in app.questions(MONDAY.date())["items"] if "Invoice" in i.get("title", ""))
+    assert when_text(it["spans"]) == "33 min at 13:34 and 23 min at 21:00"
+    t = MONDAY.replace(hour=8)
+    many = [(t + timedelta(minutes=30 * i), t + timedelta(minutes=30 * i + 5)) for i in range(5)]
+    assert when_text(many) == "25 min in 5 stretches between 08:00 and 10:05"
+
+
+def test_what_keeps_coming_back_is_kept_as_codes_only(app, tmp_path):
+    for i in range(5):
+        answer_questions(app, (MONDAY + timedelta(days=i)).date())
+    sunday = (MONDAY + timedelta(days=6)).date()
+    back = app.comes_back("URGENT: Invoice export failed", sunday)
+    assert back["days"] >= 2 and back["since"] == MONDAY.date()
+    assert app.comes_back("RE: URGENT: Invoice export failed 2026-12-01", sunday) == back    # written another way
+    kept = (app.store.dir / "repeats.json").read_text(encoding="utf-8")
+    assert "Invoice" not in kept and "invoice" not in kept
+    (tmp_path / "gone.json").write_text('{"window": [], "afk": []}')                    # window names deleted
+    c = app.store.config()
+    c["source"] = str(tmp_path / "gone.json")
+    app.store.save_config(c)
+    app.reload()
+    app.day(MONDAY.date())
+    assert app.comes_back("URGENT: Invoice export failed", sunday) == back
+
+
+def test_stretches_and_repeats_on_the_pages(app, server):
+    base, _ = server
+    page = LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
+    for i in range(5):
+        answer_questions(app, (MONDAY + timedelta(days=i)).date())
+    week = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    assert "Came back on" in week
+    assert "Email in Outlook" in page and "Message (HTML)" not in page
