@@ -84,7 +84,7 @@ def maybe_remind(store, probe, config: dict, now: datetime, show=show) -> int | 
     try:
         if probe.idle_seconds() > AWAY:
             return None
-        if config.get("detectCalls", True) and probe.mic_in_use():
+        if config.get("detectCalls", False) and probe.mic_in_use():
             return None                                  # never in the middle of a call
     except OSError:
         return None

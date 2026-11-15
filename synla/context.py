@@ -62,6 +62,28 @@ def strip_app(title: str) -> str:
     return t.strip()
 
 
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_NAME = r"[A-ZÆØÅÉ][a-zæøåéèüöäß'-]+"
+PERSON = re.compile(rf"{_NAME}(?:[ -]{_NAME}){{1,3}}(?:\s*,\s*{_NAME}(?:[ -]{_NAME}){{1,3}})*")   # Kari Nordmann, Ola Bjørn Hansen
+PERSON_RECORDS = {"contact", "lead", "user", "employee", "worker", "kontakt", "kundeemne", "bruker", "ansatt"}
+
+
+def mask(app: str, title: str) -> str:
+    """Other people's names and email addresses are hidden before anything is stored. Synla is about your time, not
+    about who you talked to: a Teams chat with a person becomes "Chat | (person) | Microsoft Teams", a contact in
+    Dynamics 365 becomes "Contact: (person)". Group chats with a topic name keep it."""
+    if not title:
+        return title
+    t = EMAIL.sub("(email)", title)
+    parts = t.split(" | ")
+    if len(parts) >= 2 and parts[-1].startswith("Microsoft Teams"):
+        t = " | ".join("(person)" if i < len(parts) - 1 and PERSON.fullmatch(p.strip()) else p for i, p in enumerate(parts))
+    crm = d365(t)
+    if crm and crm[1].lower() in PERSON_RECORDS and crm[2]:
+        t = t.replace(crm[2], "(person)", 1)
+    return t
+
+
 def d365(title: str) -> tuple | None:
     """("ce" or "fo", record type, record name or page) for a Dynamics 365 tab, else None."""
     t = (title or "").strip()

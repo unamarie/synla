@@ -52,7 +52,8 @@ def timesheet(days: dict, round_minutes: int = 15) -> dict:
     return out
 
 
-def summary(days: dict, workday=("07:00", "17:00")) -> dict:
+def summary(days: dict, workday=("07:00", "17:00"), unplanned=INVISIBLE) -> dict:
+    """unplanned: the kinds that count as unplanned work in your role (roles.unplanned)."""
     ws, we = _hm(workday[0]), _hm(workday[1])
     by_kind, by_project, invisible_ctx = Counter(), Counter(), Counter()
     meeting = urgent = pushed = 0.0
@@ -70,7 +71,7 @@ def summary(days: dict, workday=("07:00", "17:00")) -> dict:
             day_total += m
             by_kind[b.guess.kind] += m
             by_project[b.guess.project] += m
-            if b.guess.kind in INVISIBLE:
+            if b.guess.kind in unplanned:
                 day_inv += m
                 invisible_ctx[(b.guess.kind, label(b))] += m
             if not b.confirmed and b.guess.confidence < 0.7:
@@ -96,13 +97,14 @@ def summary(days: dict, workday=("07:00", "17:00")) -> dict:
         pushed += day_pushed
 
     hours = total / 60
-    inv = sum(by_kind[k] for k in INVISIBLE)
+    inv = sum(by_kind[k] for k in unplanned)
     return {
         "hours": hours,
         "by_kind": {k: by_kind[k] / 60 for k in KINDS if by_kind[k]} | ({"?": by_kind[UNKNOWN] / 60} if by_kind[UNKNOWN] else {}),
         "by_project": {p: m / 60 for p, m in by_project.most_common()},
         "invisible_hours": inv / 60,
         "meeting_hours": meeting / 60,
+        "unplanned": list(unplanned),
         "urgent_hours": urgent / 60,
         "pushed_hours": pushed / 60,
         "invisible_share": inv / total if total else 0,
@@ -118,10 +120,11 @@ def summary(days: dict, workday=("07:00", "17:00")) -> dict:
 
 def text(s: dict) -> str:
     """A short plain-text version of the summary, safe to paste into an email or a 1:1 agenda."""
+    unplanned = s.get("unplanned", INVISIBLE)
     lines = [f"Active time: {s['hours']:.1f} h",
-             f"Unplanned work (helping, firefighting, chasing, fixing data): {s['invisible_hours']:.1f} h "
+             f"Unplanned work ({', '.join(KINDS[k].lower() for k in unplanned)}): {s['invisible_hours']:.1f} h "
              f"({s['invisible_share']:.0%})"]
-    for k in INVISIBLE:
+    for k in unplanned:
         if k in s["by_kind"]:
             lines.append(f"  - {KINDS[k]}: {s['by_kind'][k]:.1f} h")
     lines += [f"Focus blocks of {FOCUS_MIN}+ min: {s['focus_blocks']} ({s['focus_hours']:.1f} h)",

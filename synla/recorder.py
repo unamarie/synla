@@ -4,9 +4,10 @@ Start it with `python -m synla record` (or let it start with Windows: `python -m
 Every five seconds it notes the app and the title of the window in front, nothing else.
 
 It never records keystrokes, screen content, the clipboard, web addresses, file contents or sound.
-You count as away after a few minutes without keyboard or mouse, unless you are in a call: Windows keeps a record of
-which app is using the microphone right now (the same record behind the microphone icon in the taskbar), and Synla
-asks only whether one is. Turn this off with "detectCalls": false in config.json.
+You count as away after a few minutes without keyboard or mouse, unless you are in a call. If you say yes to the
+microphone check, Synla asks Windows whether Teams, Zoom, Webex, Slack or Skype is using the microphone right now (the
+same record behind the microphone icon in the taskbar). It never touches the microphone or any sound, and dictation or a
+browser tab using the microphone does not count. Change it on the Your data page, or with "detectCalls" in config.json.
 
 Windows from apps or with titles on your private list are stored as "Private", with no name.
 Window names are encrypted (see protect.py) and deleted after keepWindowDays.
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import protect
+from .context import mask
+from .source import offset_now
 
 POLL = 5.0                      # seconds between samples
 GAP = POLL * 3                  # a longer gap (sleep, crash) starts a new row
@@ -31,7 +34,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS activity (
     end REAL NOT NULL,
     kind TEXT NOT NULL,         -- active, call or private
     app BLOB,                   -- encrypted on Windows
-    title BLOB                  -- encrypted on Windows
+    title BLOB,                 -- encrypted on Windows
+    tz INTEGER                  -- minutes ahead of UTC where you were, so a trip abroad keeps its own clock
 );
 CREATE INDEX IF NOT EXISTS activitystart ON activity (start);"""
 
@@ -40,6 +44,8 @@ def connect(store) -> sqlite3.Connection:
     db = sqlite3.connect(store.dir / "activity.db", timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    if "tz" not in [r[1] for r in db.execute("PRAGMA table_info(activity)")]:
+        db.execute("ALTER TABLE activity ADD COLUMN tz INTEGER")       # recorded before 0.8
     return db
 
 
@@ -52,6 +58,15 @@ def prune(store, keep_days: float):
 
 
 # ---- what Windows can tell us -----------------------------------------------------------------------------------
+CALL_MIC_APPS = ("teams", "zoom", "webex", "ciscocollab", "slack", "skype")   # in Windows' list of apps using the mic
+
+
+def is_call_app(key: str) -> bool:
+    """Windows names an app in its microphone list by package name or by path with # for \\."""
+    k = key.lower()
+    return any(x in k for x in CALL_MIC_APPS)
+
+
 class WindowsProbe:
     """Asks Windows three things: the window in front, seconds since the last key or mouse input, and whether
     any app is using the microphone. Nothing else."""
@@ -117,7 +132,7 @@ class WindowsProbe:
         return ((self.kernel32.GetTickCount() - lii.dwTime) & 0xFFFFFFFF) / 1000.0
 
     def mic_in_use(self) -> bool:
-        """True if any app is using the microphone now. Windows marks that with LastUsedTimeStop = 0."""
+        """True if a call app is using the microphone now. Windows marks that with LastUsedTimeStop = 0."""
         reg = self.winreg
 
         def walk(path) -> bool:
@@ -136,6 +151,8 @@ class WindowsProbe:
                     if sub == "NonPackaged":
                         if walk(path + "\\" + sub):
                             return True
+                        continue
+                    if not is_call_app(sub):
                         continue
                     try:
                         with reg.OpenKey(key, sub) as k:
@@ -167,13 +184,13 @@ def sample(probe, config: dict) -> tuple[str, str, str] | None:
     app, title = fg
     if app.lower() in LOCK_APPS:
         return None
-    call = looks_like_call(app, title) or (config.get("detectCalls", True) and probe.mic_in_use())
+    call = looks_like_call(app, title) or (config.get("detectCalls", False) and probe.mic_in_use())
     idle = probe.idle_seconds()
     if idle >= CALL_MAX_IDLE.total_seconds() or (idle >= float(config.get("idleMinutes", 3)) * 60 and not call):
         return None
     if is_private(app, title, config.get("privacy", {})):
         return "private", "", ""
-    return ("call" if call else "active"), app, title
+    return ("call" if call else "active"), app, mask(app, title)      # other people's names never reach the disk
 
 
 @dataclass
@@ -184,6 +201,7 @@ class _Row:
     title: str
     start: float
     end: float
+    tz: int = 0
 
 
 def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None = None, seal_weeks: bool = True,
@@ -202,7 +220,7 @@ def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None 
             if now - last_prune > PRUNE_EVERY:
                 with db:
                     db.execute("DELETE FROM activity WHERE end < ?",
-                               (now - float(config.get("keepWindowDays", 30)) * 86400,))
+                               (now - float(config.get("keepWindowDays", 14)) * 86400,))
                 last_prune = now
             if seal_weeks and now - last_seal > SEAL_EVERY:
                 last_seal = now
@@ -239,15 +257,16 @@ def run(store, probe=None, clock=time.time, sleep=time.sleep, polls: int | None 
                     last = None
                 else:
                     kind, app, title = state
+                    tz = offset_now(now)               # a new stretch when the clock changes: summer time, travel
                     continuous = last is not None and now - last.end <= GAP
-                    if continuous and (last.kind, last.app, last.title) == (kind, app, title):
+                    if continuous and (last.kind, last.app, last.title, last.tz) == (kind, app, title, tz):
                         db.execute("UPDATE activity SET end = ? WHERE rowid = ?", (now, last.rowid))
                         last.end = now
                     else:
                         start = last.end if continuous else now
-                        cur = db.execute("INSERT INTO activity VALUES (?, ?, ?, ?, ?)",
-                                         (start, now, kind, protect.enc(app), protect.enc(title)))
-                        last = _Row(cur.lastrowid, kind, app, title, start, now)
+                        cur = db.execute("INSERT INTO activity (start, end, kind, app, title, tz) VALUES (?, ?, ?, ?, ?, ?)",
+                                         (start, now, kind, protect.enc(app), protect.enc(title), tz))
+                        last = _Row(cur.lastrowid, kind, app, title, start, now, tz)
             sleep(POLL)
     finally:
         db.close()

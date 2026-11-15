@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
     "workday": {"start": "07:00", "end": "17:00"},
     "roundMinutes": 15,
     "keepDays": 90,            # your answers and the answer log
-    "keepWindowDays": 30,      # window names; after this only project, kind and time remain
+    "keepWindowDays": 14,      # window names; after this only project, kind and time remain
     "keepRecordYears": 5,      # the record book: sealed weeks with times, projects and kinds, no window names
     "weeklyHours": 37.5,       # your normal week, to show hours above it
     "recordEmail": "",         # your private address, for sending each week's fingerprint to yourself
@@ -29,12 +29,12 @@ DEFAULT_CONFIG = {
     "source": "auto",          # auto, synla, activitywatch, or a path to a JSON file (the demo)
     "activityWatchUrl": "http://localhost:5600",
     "idleMinutes": 3,          # no keyboard or mouse for this long counts as away, unless you are in a call
-    "detectCalls": True,       # ask Windows whether an app is using the microphone (never what is said)
     "privacy": {
         # windows from these apps, or with these words in the title, are recorded as "Private" with no name
         "skipApps": ["keepass.exe", "keepassxc.exe", "1password.exe", "bitwarden.exe", "lastpass.exe"],
         "skipTitleWords": ["InPrivate", "Incognito", "Private Browsing", "Privat nettlesing", "nettbank",
-                           "Helsenorge"],
+                           "Helsenorge", "nav.no", "Sykmelding", "Sykemelding", "Legevakt", "Psykolog", "apotek",
+                           "Fagforbundet", "fagforening", "Tekna", "Negotia", "Akademikerne", "Parat.com"],
     },
 }
 
@@ -81,7 +81,10 @@ class Store:
             c = json.loads(json.dumps(DEFAULT_CONFIG))
             self._write("config.json", c)
         merged = {**DEFAULT_CONFIG, **c}
-        merged["privacy"] = {**DEFAULT_CONFIG["privacy"], **c.get("privacy", {})}
+        own = c.get("privacy", {}) if isinstance(c.get("privacy"), dict) else {}
+        merged["privacy"] = {**DEFAULT_CONFIG["privacy"], **own}
+        for k in ("skipApps", "skipTitleWords"):      # updates only add to the private list, never take from yours
+            merged["privacy"][k] = list(dict.fromkeys(DEFAULT_CONFIG["privacy"][k] + list(own.get(k, []))))
         return merged
 
     def save_config(self, c: dict):

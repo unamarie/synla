@@ -6,7 +6,7 @@
   python -m synla remind          show what the end of day reminder looks like
   python -m synla pause 60        pause recording for 60 minutes (resume to start again)
   python -m synla week            print this week's summary
-  python -m synla export          write this week's timesheet as CSV
+  python -m synla export          write this week's timesheet as CSV (--excel for Excel with Norwegian settings)
   python -m synla demo            try it with a made-up week, kept in its own folder
   python -m synla seal            seal last week in the record book (--date for another week)
   python -m synla verify          check the record book; add a fingerprint or a downloaded record to check that
@@ -35,6 +35,7 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=5700)
     ap.add_argument("--out", help="file for export (default: timesheet-<date>.csv)")
     ap.add_argument("--home", help="where Synla keeps its files")
+    ap.add_argument("--excel", action="store_true", help="export for Excel with Norwegian settings (semicolons, decimal commas)")
     a = ap.parse_args(argv)
 
     if a.command == "demo":
@@ -117,7 +118,7 @@ def main(argv=None):
     elif a.command == "export":
         out = a.out or f"timesheet-{d}.csv"
         with open(out, "w", encoding="utf-8", newline="") as f:
-            f.write(csv_text(app, d))
+            f.write(csv_text(app, d, a.excel))
         print("wrote", out)
 
 

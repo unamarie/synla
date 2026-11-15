@@ -7,6 +7,7 @@ a file path:    a JSON file shaped like ActivityWatch events, used by the demo w
 """
 import json
 import socket
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -64,8 +65,8 @@ class SynlaRecorder:
             return []
         from .recorder import connect
         db = connect(self.store)
-        rows = db.execute("SELECT start, end, kind, app, title FROM activity WHERE start < ? AND end > ? ORDER BY start",
-                          (end.timestamp(), start.timestamp())).fetchall()
+        rows = db.execute("SELECT start, end, kind, app, title, tz FROM activity WHERE start < ? AND end > ? "
+                          "ORDER BY start", (end.timestamp(), start.timestamp())).fetchall()
         db.close()
         return rows
 
@@ -84,14 +85,14 @@ class SynlaRecorder:
             return cache[b]
 
         win = []
-        for s, e, kind, app, title in self._rows(start, end):
+        for s, e, kind, app, title, tz in self._rows(start, end):
             s, e = max(s, start.timestamp()), min(e, end.timestamp())
             if e - s < 1:
                 continue
             data = {"app": "Private", "title": ""} if kind == "private" else {"app": plain(app), "title": plain(title)}
             data["call"] = kind == "call"
             win.append({"timestamp": datetime.fromtimestamp(s, timezone.utc).isoformat(), "duration": e - s,
-                        "data": data})
+                        "data": data} | ({"tz": tz} if tz is not None else {}))
         return win, []          # the recorder never stores away time, so there is nothing to cut out
 
 
@@ -132,5 +133,11 @@ class JsonFile:
 
 
 def day_range(day):
-    start = datetime(day.year, day.month, day.day).astimezone()
-    return start, start + timedelta(days=1)
+    """Midnight to midnight on this computer's clock. When summer time starts or ends, the day is 23 or 25 hours."""
+    nxt = day + timedelta(days=1)
+    return datetime(day.year, day.month, day.day).astimezone(), datetime(nxt.year, nxt.month, nxt.day).astimezone()
+
+
+def offset_now(t: float | None = None) -> int:
+    """Minutes ahead of UTC on this computer's clock at time t: 60 in Norwegian winter, 120 in summer."""
+    return int(datetime.fromtimestamp(t if t is not None else time.time()).astimezone().utcoffset().total_seconds() // 60)

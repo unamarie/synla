@@ -1,10 +1,11 @@
 """Ties it together: reads activity, applies what Synla has learned and what you have answered."""
+import hashlib
 import secrets
 import time as clock
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 
-from . import protect, recorder, report, roles, workload
+from . import holidays, protect, recorder, report, roles, workload
 from .blocks import _subtract, blocks, segments
 from .classify import ASK_BELOW, Classifier
 from .blocks import NOISE
@@ -23,8 +24,44 @@ ASK_MIN = 5.0            # minutes; smaller unsure windows keep Synla's best gue
 FOLD_AFTER = 28         # days: a choice you have not used for this long moves under More
 SHOW_PROJECTS = 5       # projects shown as buttons; the rest are one search away
 GAP_MIN = 30.0           # minutes away from the computer inside your workday before Synla asks what it was
+OFF = {"vacation": "Vacation", "sick": "Sick", "sickchild": "Sick child", "timeoff": "Time off"}
+SPOT_MIN = 10.0          # minutes; the daily spot check is about a window Synla sorted on its own for this long
+OFF_ASK_DAYS = 14        # an empty workday is asked about ("Were you off?") for two weeks, then left alone
+WIDE = timedelta(hours=14)   # a day abroad can start up to 14 hours before or after a day at home
 LUNCH = (time(10, 30), time(13, 0), 45.0)   # away starting in this window and no longer than this: a break, not asked
 LIKE_BREAK = 30          # minutes: away starting this close to two earlier "Not work" answers is not asked either
+
+
+def _minutes(t: datetime) -> int:
+    return int(t.utcoffset().total_seconds() // 60)
+
+
+def _clock(utc: str, tz: int | None) -> datetime:
+    """A stored moment on the clock it was lived on (minutes ahead of UTC), or on this computer's clock."""
+    t = datetime.fromisoformat(utc)
+    return t.astimezone(timezone(timedelta(minutes=tz))) if tz is not None else t.astimezone()
+
+
+def _on_clock(d: date, t: time, tz=None) -> datetime:
+    """Wall clock time t on day d: on this computer's clock, unless the day was lived on another one (abroad)."""
+    local = datetime.combine(d, t).astimezone()
+    return local if tz is None or local.utcoffset() == tz.utcoffset(None) else datetime.combine(d, t, tz)
+
+
+def _own_day(s: Segment, d: date) -> list:
+    """The part of a stretch that falls on day d, on the clock it was recorded on."""
+    tz = s.start.tzinfo
+    a, b = datetime.combine(d, time(0), tz), datetime.combine(d + timedelta(days=1), time(0), tz)
+    lo, hi = max(s.start, a), min(s.end, b)
+    if (hi - lo).total_seconds() < 1:
+        return []
+    return [Segment(lo.astimezone(tz), hi.astimezone(tz), s.app, s.title, s.call)]
+
+
+def _cut(segs: list, holes: list) -> list:
+    """Take holes out of stretches, keeping each stretch's own clock."""
+    return [Segment(a.astimezone(s.start.tzinfo), b.astimezone(s.start.tzinfo), s.app, s.title, s.call)
+            for s in segs for a, b in _subtract(s.start, s.end, holes) if (b - a).total_seconds() >= 1]
 
 
 class Synla:
@@ -75,13 +112,13 @@ class Synla:
 
     def _note_repeats(self, d: date, bl: list):
         """Unplanned work by source for this day, kept as one-way codes with kind and minutes. Window names are deleted
-        after 30 days, but these codes let Synla see for as long as your answers are kept that the same failure keeps
+        after 14 days, but these codes let Synla see for as long as your answers are kept that the same failure keeps
         coming back. A code can't be turned back into the name."""
         if not any(s.title != DELETED and s.app != MANUAL_APP for b in bl for s in b.segments):
             return                                     # names deleted: keep what was noted while they were there
         day = {}
         for b in bl:
-            if b.guess.kind in INVISIBLE and b.main.app != MANUAL_APP and b.main.title != DELETED:
+            if b.guess.kind in roles.unplanned(self.config) and b.main.app != MANUAL_APP and b.main.title != DELETED:
                 c = self.repeat_code(report.label(b))
                 kind, minutes = day.get(c, [b.guess.kind, 0.0])
                 day[c] = [kind, round(minutes + b.minutes, 1)]
@@ -122,42 +159,46 @@ class Synla:
         return g.confidence < ASK_BELOW or g.project == UNKNOWN
 
     def _read_day(self, d: date) -> list:
+        """A day is midnight to midnight where you were: each stretch keeps the clock it was recorded on, so summer
+        time and a trip abroad do not move work into the evening or into the next day."""
         start, end = day_range(d)
-        win, afk = self.source.events(start, end)
-        segs = segments(win, afk)
-        paused = [(a.astimezone(), b.astimezone(), None) for a, b in self.store.pauses() if a < end and start < b]
+        win, afk = self.source.events(start - WIDE, end + WIDE)
+        segs = [x for s in segments(win, afk) for x in _own_day(s, d)]
+        paused = [(a, b, None) for a, b in self.store.pauses() if a < end + WIDE and start - WIDE < b]
         if paused:                        # paused means paused, also when another program kept recording
-            segs = [Segment(a, b, s.app, s.title, s.call) for s in segs for a, b in _subtract(s.start, s.end, paused)
-                    if (b - a).total_seconds() >= 1]
+            segs = _cut(segs, paused)
         decisions = dict(self.store.decisions())
-        added = self._manual(start, end)
+        added = self._manual(d)
         if added:                         # time you added wins over whatever the computer recorded then
-            holes = [(m.start, m.end, None) for m, _ in added]
-            segs = [Segment(a, b, s.app, s.title, s.call) for s in segs for a, b in _subtract(s.start, s.end, holes)
-                    if (b - a).total_seconds() >= 1]
+            segs = _cut(segs, [(m.start, m.end, None) for m, _ in added])
         if not segs:                      # window names deleted: rebuild the day from your answers alone
-            segs = self._from_decisions(decisions, start, end)
+            segs = self._from_decisions(decisions, d)
         for m, e in added:
             decisions[m.id] = {"project": e["project"], "kind": e["kind"], "how": "manual"}
         return blocks(sorted(segs + [m for m, _ in added], key=lambda s: s.start), self.classifier, decisions)
 
-    def _manual(self, start, end) -> list:
+    def _manual(self, d: date) -> list:
         out = []
         for e in self.store.manual():
-            s = datetime.fromisoformat(e["start"]).astimezone()
-            if start <= s < end:
-                out.append((Segment(s, datetime.fromisoformat(e["end"]).astimezone(), MANUAL_APP, MANUAL_TITLE,
+            s = _clock(e["start"], e.get("tz"))
+            if s.date() == d:
+                out.append((Segment(s, _clock(e["end"], e.get("tz")), MANUAL_APP, MANUAL_TITLE,
                                     bool(e.get("meeting"))), e))
         return out
 
     @staticmethod
-    def _from_decisions(decisions, start, end) -> list:
+    def _from_decisions(decisions, d: date) -> list:
         out = []
         for k, v in decisions.items():
-            s = datetime.fromisoformat(k).astimezone()
-            if start <= s < end and v.get("end"):
-                out.append(Segment(s, datetime.fromisoformat(v["end"]).astimezone(), "", DELETED))
+            s = _clock(k, v.get("tz"))
+            if s.date() == d and v.get("end"):
+                out.append(Segment(s, _clock(v["end"], v.get("tz")), "", DELETED))
         return sorted(out, key=lambda x: x.start)
+
+    def day_clock(self, d: date):
+        """The clock a day was lived on: the time zone of its first stretch. None means this computer's clock."""
+        segs = [s for b in self.day(d) for s in b.segments]
+        return segs[0].start.tzinfo if segs else None
 
     def week(self, any_day: date) -> dict:
         monday = any_day - timedelta(days=any_day.weekday())
@@ -170,7 +211,7 @@ class Synla:
         return out
 
     def summary(self, any_day: date) -> dict:
-        return report.summary(self.week(any_day), self.workday)
+        return report.summary(self.week(any_day), self.workday, roles.unplanned(self.config))
 
     def unsorted_windows(self, bl: list, limit: int = 8) -> list:
         """The windows behind most of the unsorted time today, biggest first. One answer covers all of them."""
@@ -249,9 +290,16 @@ class Synla:
 
     def questions(self, d: date) -> dict:
         """What Synla asks you about this day: the windows behind most of the unsure time, biggest first.
-        Only windows of ASK_MIN minutes or more, at most QUESTIONS_PER_DAY a day; the rest keeps Synla's best guess."""
+        Only windows of ASK_MIN minutes or more, at most QUESTIONS_PER_DAY a day; the rest keeps Synla's best guess.
+        Nothing on a red day or a day off. An empty workday gets one question: were you off?"""
         state = self.store.day_state(d)
         skipped = set(state.get("skipped", []))
+        if self.free(d):
+            return {"items": [], "waiting": 0, "answered": int(state.get("answered", 0)), "skipped": len(skipped),
+                    "spot": None}
+        if self._ask_off(d) and "off:" + d.isoformat() not in skipped:
+            return {"items": [{"type": "offday", "code": "off:" + d.isoformat(), "size": 0.0}], "waiting": 0,
+                    "answered": int(state.get("answered", 0)), "skipped": len(skipped), "spot": None}
         items = []
         for w in self.unsorted_windows(self.day(d), limit=100):
             if w["unsure"] < ASK_MIN:
@@ -266,14 +314,86 @@ class Synla:
         answered = int(state.get("answered", 0))
         room = len(items) if state.get("more") else max(0, QUESTIONS_PER_DAY - answered)
         return {"items": items[:room], "waiting": max(0, len(items) - room), "answered": answered,
-                "skipped": len(skipped)}
+                "skipped": len(skipped), "spot": self.spot_window(d)}     # the spot check comes after the questions
+
+    def spot_window(self, d: date) -> dict | None:
+        """One window a day that Synla sorted on its own, picked at random, so you can see how often Synla is right
+        when it does not ask. Questions are about unsure time, so they alone would make Synla look worse than it is."""
+        state = self.store.day_state(d)
+        if not self.config.get("spotChecks", True) or state.get("spot") or self.free(d):
+            return None
+        agg = {}
+        for b in self.day(d):
+            if b.confirmed:
+                continue
+            for s in b.segments:
+                if s.title == DELETED or s.app == MANUAL_APP or self.unsure(b, s):
+                    continue
+                a = agg.setdefault(s.key, {"key": s.key, "app": s.app, "title": s.title, "unsure": 0.0, "minutes": 0.0,
+                                           "ids": [], "blocks": set(), "call": False, "first": s.start, "last": s.end,
+                                           "spans": []})
+                a["spans"].append((s.start, s.end))
+                a["minutes"] += s.minutes
+                a["ids"].append(s.id)
+                a["blocks"].add(b.id)
+                a["call"] = a["call"] or s.call
+                a["first"], a["last"] = min(a["first"], s.start), max(a["last"], s.end)
+        pool = sorted((a for a in agg.values() if a["minutes"] >= SPOT_MIN), key=lambda a: a["key"])
+        if not pool:
+            return None
+        n = int(hashlib.sha256((d.isoformat() + str(len(pool))).encode()).hexdigest(), 16)
+        w = pool[n % len(pool)]
+        return dict(w, type="window", spot=True, size=0.0, code="spot:" + self.window_code(w["key"]),
+                    guess=self.classifier.guess(w["app"], w["title"], w["call"]))
+
+    # ---- red days and days off --------------------------------------------------------------------------------
+    def red_day(self, d: date) -> str | None:
+        return holidays.red_day(self.config, d)
+
+    def day_off(self, d: date) -> str | None:
+        v = self.store.day_state(d).get("off")
+        return v if v in OFF else None
+
+    def free(self, d: date) -> str | None:
+        """Why Synla asks nothing about a day: the day off you marked, or the red day. None on a normal day."""
+        off = self.day_off(d)
+        return OFF[off] if off else self.red_day(d)
+
+    def set_day_off(self, d: date, kind: str | None):
+        """Vacation, sick, sick child or time off for a whole day; None takes it back. Only the kind is kept."""
+        if kind and kind not in OFF:
+            raise ValueError("Pick vacation, sick, sick child or time off.")
+        snap = self._snapshot()
+        state = self.store.day_state(d)
+        if kind:
+            state["off"] = kind
+        else:
+            state.pop("off", None)
+        self.store.save_day_state(d, state)
+        self._changed()
+        self._done(snap)
+
+    def _ask_off(self, d: date) -> bool:
+        """An empty past workday in a week with work on other days: probably a day off, so Synla asks once."""
+        today = self.today()
+        if d.weekday() >= 5 or not (0 < (today - d).days <= OFF_ASK_DAYS) or self.day(d):
+            return False
+        if self.config.get("source", "auto") in ("auto", "synla", "activitywatch") and d.isoformat() < self.store.gaps_since():
+            return False
+        monday = d - timedelta(days=d.weekday())
+        return any(self.day(monday + timedelta(days=i)) for i in range(7) if monday + timedelta(days=i) != d)
+
+    def normal_hours(self, monday: date) -> float:
+        """Your normal week, less red days and days off."""
+        weekly = float(self.config.get("weeklyHours", 37.5))
+        return weekly * sum(1 for i in range(5) if not self.free(monday + timedelta(days=i))) / 5
 
     # ---- time away from the computer -------------------------------------------------------------------------
     def gaps(self, d: date) -> list:
         """Time away worth asking about: 30 minutes or more on a weekday, starting and ending inside your workday, so
         Synla never asks about mornings, evenings or leaving early. Never paused time, never a likely break, never days
         before this version, never when turned off. "Not work" is always an answer, and Synla never asks why."""
-        if not self.config.get("askAboutGaps", True) or d.weekday() >= 5:
+        if not self.config.get("askAboutGaps", True) or d.weekday() >= 5 or self.free(d):
             return []
         if self.config.get("source", "auto") in ("auto", "synla", "activitywatch") and \
                 d.isoformat() < self.store.gaps_since():
@@ -300,7 +420,7 @@ class Synla:
 
     def likely_break(self, start: datetime, minutes: float) -> bool:
         """Lunch, or a break like ones you already called "Not work" twice."""
-        t = start.astimezone().time()
+        t = start.time()                  # the clock where you were
         if LUNCH[0] <= t <= LUNCH[1] and minutes <= LUNCH[2]:
             return True
         at = t.hour * 60 + t.minute
@@ -331,7 +451,7 @@ class Synla:
         """It was work: the time is added like any time away from the computer. You can shorten it first."""
         g = self._open_gap(d, code)
         snap = self._snapshot()
-        start = self.add_time(d, start_hm, end_hm, project, kind, meeting)
+        start = self.add_time(d, start_hm, end_hm, project, kind, meeting, tz=g["start"].tzinfo)
         self._away(d, g, "work")
         self._done(snap)
         return start
@@ -348,6 +468,8 @@ class Synla:
         snap = self._snapshot()
         state = self.store.day_state(d)
         state["skipped"] = sorted(set(state.get("skipped", [])) | {code})
+        if code.startswith("spot:"):
+            state["spot"] = True
         self.store.save_day_state(d, state)
         self._done(snap)
 
@@ -373,9 +495,11 @@ class Synla:
         asked: the answer came from one of the day's questions, so it counts against the day's limit."""
         snap = self._snapshot()
         n = self._apply(d, [(set(ids), project, kind)], how)
-        if asked:
+        if asked or how == "spot":
             state = self.store.day_state(d)
-            state["answered"] = int(state.get("answered", 0)) + 1
+            state["answered"] = int(state.get("answered", 0)) + (1 if asked else 0)
+            if how == "spot":
+                state["spot"] = True          # one spot check a day
             self.store.save_day_state(d, state)
         self._done(snap)
         return n
@@ -455,11 +579,12 @@ class Synla:
                         self.classifier.learn(s.app, s.title, project, kind, call=s.call)
                 for seg in w["segs"]:
                     dec[seg.id] = {"end": utc_key(seg.end), "project": project, "kind": kind, "how": how,
-                                   "taught": teach}
+                                   "taught": teach, "tz": _minutes(seg.start)}
                     covered += 1
+            batch = secrets.token_hex(4)              # one answer can touch several blocks
             for t in touched.values():
                 g = t["block"].guess
-                self.store.log({"block": t["block"].id, "minutes": round(t["minutes"], 1), "how": how,
+                self.store.log({"block": t["block"].id, "minutes": round(t["minutes"], 1), "how": how, "batch": batch,
                                 "guess": [g.project, g.kind], "confidence": g.confidence,
                                 "answer": [project, kind], "right": [g.project, g.kind] == [project, kind],
                                 "was": t["was"], "wasHow": t["wasHow"]})
@@ -475,10 +600,12 @@ class Synla:
         self.reload()
 
     # ---- time away from the computer -------------------------------------------------------------------------
-    def add_time(self, d: date, start_hm: str, end_hm: str, project: str, kind: str, meeting: bool = False):
-        """Time the computer could not see: a site visit, a meeting in person, a phone call. No notes are stored."""
-        s = datetime.combine(d, time.fromisoformat(start_hm)).astimezone()
-        e = datetime.combine(d, time.fromisoformat(end_hm)).astimezone()
+    def add_time(self, d: date, start_hm: str, end_hm: str, project: str, kind: str, meeting: bool = False,
+                 tz=None):
+        """Time the computer could not see: a site visit, a meeting in person, a phone call. No notes are stored.
+        The times are on the clock of that day, also when the day was spent abroad."""
+        tz = tz or self.day_clock(d)
+        s, e = (_on_clock(d, time.fromisoformat(x), tz) for x in (start_hm, end_hm))
         if e <= s:
             raise ValueError("The end must be after the start.")
         if not project or kind not in KINDS:
@@ -488,7 +615,7 @@ class Synla:
             xs, xe = datetime.fromisoformat(x["start"]), datetime.fromisoformat(x["end"])
             if s < xe and xs < e:
                 raise ValueError("This overlaps time you already added.")
-        entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind}
+        entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind, "tz": _minutes(s)}
                        | ({"meeting": True} if meeting else {}))
         self.store.save_manual(entries)
         self._changed()
@@ -501,13 +628,14 @@ class Synla:
     # ---- workload --------------------------------------------------------------------------------------------
     def workload(self, any_day: date) -> dict:
         days = self.week(any_day)
-        return workload.assess(workload.measure(days, report.summary(days, self.workday)), self.config)
+        return workload.assess(workload.measure(days, report.summary(days, self.workday, roles.unplanned(self.config))),
+                               self.config)
 
     # ---- record book -----------------------------------------------------------------------------------------
     def statement(self, monday: date) -> dict:
         """This week's record as it stands now: stretches of time with project, kind and who decided it."""
         days = self.week(monday)
-        s = report.summary(days, self.workday)
+        s = report.summary(days, self.workday, roles.unplanned(self.config))
         projects, kinds = defaultdict(float), defaultdict(float)
         unconfirmed = 0.0
         out_days = []
@@ -526,7 +654,9 @@ class Synla:
                     unconfirmed += b.minutes
             out_days.append({"date": d.isoformat(), "hours": round(sum(b.minutes for b in bl) / 60, 2),
                              "outsideHours": round(s["per_day"][d]["after"], 2), "stretches": stretches})
-        return {"record": FORMAT, "week": monday.isoformat(), "days": out_days,
+        off = {(monday + timedelta(days=i)).isoformat(): self.day_off(monday + timedelta(days=i)) for i in range(7)}
+        off = {k: v for k, v in off.items() if v}
+        return {"record": FORMAT, "week": monday.isoformat(), "days": out_days, **({"off": off} if off else {}),
                 "projects": {p: round(m / 60, 2) for p, m in sorted(projects.items())},
                 "kinds": {k: round(m / 60, 2) for k, m in sorted(kinds.items())},
                 "totalHours": round(s["hours"], 2), "outsideHours": round(s["after_hours"], 2),
@@ -572,7 +702,6 @@ class Synla:
     def weeks(self, mondays: list) -> list:
         """One row per week for the year report and the trend: from the record book, or live for open weeks."""
         sealed = self.record.latest_per_week()
-        weekly = float(self.config.get("weeklyHours", 37.5))
         oldest_live = date.today() - timedelta(days=int(self.config.get("keepDays", 90)) + 7)
         rows = []
         for monday in mondays:
@@ -589,7 +718,7 @@ class Synla:
                 status = "open"
             a = workload.assess(st.get("workload", {}), self.config)
             rows.append({"monday": monday, "seal": seal, "status": status or "sealed", "hours": st["totalHours"],
-                         "outside": st["outsideHours"], "over": max(0.0, st["totalHours"] - weekly),
+                         "outside": st["outsideHours"], "over": max(0.0, st["totalHours"] - self.normal_hours(monday)),
                          "unconfirmed": st["unconfirmedHours"], "projects": st["projects"],
                          "unplanned": st.get("workload", {}).get("unplanned", 0.0), "level": a["level"]})
         return rows
@@ -613,7 +742,15 @@ class Synla:
         yours = [e for e in log if not e.get("was") and e.get("how") != "bulk"]
         bulk = [e for e in log if e.get("how") == "bulk"]
         changed = [e for e in log if e.get("wasHow") == "bulk" and e.get("was") != e.get("answer")]
-        out = {"answers": len(yours), "bulk": len(bulk), "bulk_changed": len(changed)}
+        spot = {}
+        for e in yours:                           # a spot check is right when every block it touched was right
+            if e.get("how") == "spot":
+                k = e.get("batch") or e.get("at")
+                spot[k] = spot.get(k, True) and bool(e["right"])
+        asked = [e for e in yours if e.get("how") != "spot"]
+        out = {"answers": len(yours), "bulk": len(bulk), "bulk_changed": len(changed),
+               "spot": len(spot), "spot_right": sum(spot.values()),
+               "asked": len(asked), "asked_right": sum(bool(e["right"]) for e in asked)}
         if yours:
             recent = yours[-50:]
             out["right_share"] = sum(e["right"] for e in yours) / len(yours)
@@ -629,7 +766,7 @@ class Synla:
             pass
         self.store.forget(int(self.config.get("keepDays", 90)))
         if (self.store.dir / "activity.db").exists():
-            recorder.prune(self.store, float(self.config.get("keepWindowDays", 30)))
+            recorder.prune(self.store, float(self.config.get("keepWindowDays", 14)))
         self.record.prune(float(self.config.get("keepRecordYears", 5)))
         self._changed()
 
@@ -654,12 +791,13 @@ class Synla:
             "pauses": len(self.store.pauses()),
             "repeats": sum(len(v) for v in self.store.repeats().values()),
             "askAboutGaps": bool(self.config.get("askAboutGaps", True)),
+            "spotChecks": bool(self.config.get("spotChecks", True)),
             "clues": sum(len(v) for k, v in mem.items() if k in ("project", "kind")),
             "seals": len(seals),
             "seals_first": seals[0]["week"] if seals else None,
             "keepDays": int(self.config.get("keepDays", 90)),
-            "keepWindowDays": int(self.config.get("keepWindowDays", 30)),
+            "keepWindowDays": int(self.config.get("keepWindowDays", 14)),
             "keepRecordYears": float(self.config.get("keepRecordYears", 5)),
             "privacy": self.config.get("privacy", {}),
-            "detectCalls": bool(self.config.get("detectCalls", True)),
+            "detectCalls": bool(self.config.get("detectCalls", False)),
         }

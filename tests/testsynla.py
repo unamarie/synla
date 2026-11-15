@@ -1,5 +1,9 @@
 import base64
+import csv
+import io
 import json
+import os
+import time as time_module
 from pathlib import Path
 import sys
 import threading
@@ -9,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from synla import demo, notify, protect, record, recorder, report, workload
+from synla import demo, notify, protect, record, recorder, report, roles, workload
 from synla.__main__ import verify
 from synla.app import DELETED, Synla
 from synla.model import KINDS, MANUAL_APP
@@ -365,7 +369,7 @@ def test_today_page_asks_and_answers_over_http(app, server):
     assert "Never recorded" in LOCAL.open(f"{base}/data").read().decode()
     assert "Copy table" in LOCAL.open(f"{base}/week/timesheet?date={d}").read().decode()
     assert "Focus time" in LOCAL.open(f"{base}/week/indicators?date={d}").read().decode()
-    assert LOCAL.open(f"{base}/export.csv?date={d}").read().decode().startswith("date,project,hours")
+    assert LOCAL.open(f"{base}/export.csv?date={d}").read().decode().startswith("date,code,project,hours")
     assert LOCAL.open(f"{base}/ping").read() == b"synla"
 
 
@@ -545,9 +549,14 @@ def answer_questions(app, d):
         it = app.questions(d)["items"][0]
         if it["type"] == "gap":
             answer_gap(app, d, it, *GAP_TRUTH)
+        elif it["type"] == "offday":
+            app.skip(d, it["code"])
         else:
             app.answer(d, it["ids"], *truth(it["title"]), how="window", asked=True)
         n += 1
+    spot = app.questions(d)["spot"]                   # the daily spot check comes after the questions
+    if spot:
+        app.answer(d, spot["ids"], *truth(spot["title"]), how="spot", asked=True)
     return n
 
 
@@ -652,7 +661,8 @@ def test_the_end_of_day_reminder(app):
     assert not notify.due((MONDAY + timedelta(days=5)).replace(hour=17), app.config, None)      # Saturday
     assert notify.reminder_time({"reminder": "off"}) is None
     shown = []
-    assert notify.maybe_remind(app.store, AtTheComputer(mic=True), app.config, four, show=lambda *a: shown.append(a)) is None
+    calls = dict(app.config, detectCalls=True)                      # with the microphone check: never during a call
+    assert notify.maybe_remind(app.store, AtTheComputer(mic=True), calls, four, show=lambda *a: shown.append(a)) is None
     assert notify.maybe_remind(app.store, AtTheComputer(idle=600), app.config, four, show=lambda *a: shown.append(a)) is None
     assert notify.maybe_remind(app.store, AtTheComputer(), app.config, four, show=lambda *a: shown.append(a)) == 5
     assert notify.maybe_remind(app.store, AtTheComputer(), app.config, four, show=lambda *a: shown.append(a)) is None
@@ -1003,3 +1013,297 @@ def test_urgent_work_pushes_planned_work(app, server):
 def server_week(app):
     from synla.server import week_view
     return week_view(app, MONDAY.date())
+
+
+# ---- summer time and travel -------------------------------------------------------------------------------------
+@pytest.fixture
+def oslo():
+    """Run a test on a computer set to Norwegian time."""
+    if not hasattr(time_module, "tzset"):
+        pytest.skip("needs time.tzset")
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Oslo"
+    time_module.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time_module.tzset()
+
+
+def _file_app(tmp_path, events):
+    store = Store(tmp_path)
+    (tmp_path / "w.json").write_text(json.dumps({"window": events, "afk": []}))
+    store.save_config(dict(demo.DEMO_CONFIG, source=str(tmp_path / "w.json")))
+    return Synla(store)
+
+
+def _ev(utc: str, minutes: float, title="quality-gate.py - Visual Studio Code"):
+    return {"timestamp": utc, "duration": minutes * 60, "data": {"app": "Code.exe", "title": title}}
+
+
+def _minutes_on(app, d):
+    return round(sum(s.minutes for b in app.day(d) for s in b.segments))
+
+
+def test_summer_time_ends_and_the_last_hour_still_counts(tmp_path, oslo):
+    # 25 October 2026 has 25 hours. 23:20 to 23:50 that evening must count, once
+    app = _file_app(tmp_path, [_ev("2026-10-25T22:20:00+00:00", 30)])
+    assert _minutes_on(app, date(2026, 10, 25)) == 30 and _minutes_on(app, date(2026, 10, 26)) == 0
+
+
+def test_summer_time_starts_and_no_hour_counts_twice(tmp_path, oslo):
+    # 29 March 2026 has 23 hours. 00:20 on Monday 30 March belongs to Monday only
+    app = _file_app(tmp_path, [_ev("2026-03-29T22:20:00+00:00", 30)])
+    assert _minutes_on(app, date(2026, 3, 29)) == 0 and _minutes_on(app, date(2026, 3, 30)) == 30
+
+
+def test_a_trip_abroad_keeps_its_own_clock(tmp_path, oslo):
+    store = Store(tmp_path)
+    store.save_config(dict(demo.DEMO_CONFIG, source="synla"))
+    db = recorder.connect(store)
+    new_york = -300
+    for utc, minutes in (("2026-11-09T18:00:00+00:00", 240), ("2026-11-10T01:00:00+00:00", 30)):  # 13:00 and 20:00 there
+        s = datetime.fromisoformat(utc).timestamp()
+        db.execute("INSERT INTO activity (start, end, kind, app, title, tz) VALUES (?, ?, ?, ?, ?, ?)",
+                   (s, s + minutes * 60, "active", protect.enc("Code.exe"),
+                    protect.enc("quality-gate.py - Visual Studio Code"), new_york))
+    db.commit()
+    db.close()
+    app = Synla(store)
+    monday = date(2026, 11, 9)
+    segs = [s for b in app.day(monday) for s in b.segments]
+    assert [f"{s.start:%H:%M}" for s in segs] == ["13:00", "20:00"]           # the evening there stays on Monday
+    assert _minutes_on(app, date(2026, 11, 10)) == 0
+    s = app.summary(monday)
+    assert abs(s["after_hours"] - 0.5) < 0.01         # only the evening there is outside working hours, not the afternoon
+    app.add_time(monday, "10:00", "11:00", "Internal", "project")
+    added = next(x for b in app.day(monday) for x in b.segments if x.app == MANUAL_APP)
+    assert f"{added.start:%H:%M}" == "10:00" and added.start.utcoffset() == timedelta(minutes=new_york)
+
+
+def test_the_recorder_starts_a_new_stretch_when_the_clock_changes(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    clock = iter(range(1_800_000_000, 1_800_000_000 + 10 * 5, 5))
+    offsets = iter([60, 60, 120, 120, 120, 120, 120, 120, 120, 120])
+    monkeypatch.setattr(recorder, "offset_now", lambda t=None: next(offsets))
+
+    class Probe:
+        def foreground(self): return ("Code.exe", "quality-gate.py - Visual Studio Code")
+        def idle_seconds(self): return 0.0
+        def mic_in_use(self): return False
+
+    recorder.run(store, probe=Probe(), clock=lambda: next(clock), sleep=lambda s: None, polls=4, seal_weeks=False,
+                 remind=False)
+    db = recorder.connect(store)
+    assert [r[0] for r in db.execute("SELECT tz FROM activity ORDER BY start")] == [60, 120]
+    db.close()
+
+
+# ---- roles where following up or cases are the job ----------------------------------------------------------------
+def test_each_role_decides_what_counts_as_planned(app):
+    assert roles.unplanned({"role": "coordinator"}) == ("firefighting", "datafixing")
+    assert roles.unplanned({"role": "specialist"}) == ("helping", "firefighting", "chasing", "datafixing")
+    assert "firefighting" in roles.unplanned({"role": "service"})            # urgent work is never planned
+    assert roles.say({"role": "service"}, "project") == "Cases" and roles.say({"role": "service"}, "firefighting") == "Escalations"
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    analyst = app.summary(MONDAY.date())
+    app.config["role"] = "coordinator"
+    coordinator = app.summary(MONDAY.date())
+    assert coordinator["hours"] == analyst["hours"]                           # same time, counted for another job
+    left = analyst["by_kind"].get("chasing", 0) + analyst["by_kind"].get("helping", 0)
+    assert left > 0 and abs(analyst["invisible_hours"] - coordinator["invisible_hours"] - left) < 0.01
+    assert "following up" not in report.text(coordinator).split("\n")[1].lower()
+
+
+# ---- red days and days off ------------------------------------------------------------------------------------------
+def test_red_days_are_worked_out_without_internet():
+    from synla import holidays
+    assert [holidays.easter(y) for y in (2025, 2026, 2027)] == [date(2025, 4, 20), date(2026, 4, 5), date(2027, 3, 28)]
+    assert holidays.red_day({}, date(2026, 5, 17)) == "Constitution Day"
+    assert holidays.red_day({}, date(2026, 5, 14)) == "Ascension Day" and holidays.red_day({}, date(2026, 4, 2)) == "Maundy Thursday"
+    assert holidays.red_day({"holidays": ""}, date(2026, 5, 17)) is None and holidays.red_day({}, date(2026, 5, 18)) is None
+
+
+def _two_days(tmp_path):
+    """Monday and Tuesday of week 46 at work, nothing on Wednesday."""
+    events = []
+    for day in ("2026-11-09", "2026-11-10"):
+        for h in range(8, 15):
+            events.append(_ev(f"{day}T{h - 1:02d}:00:00+00:00", 50, f"quality-gate.py - Visual Studio Code"))
+    app = _file_app(tmp_path, events)
+    app.home = date(2026, 11, 13)
+    return app
+
+
+def test_an_empty_workday_asks_if_you_were_off(tmp_path):
+    app = _two_days(tmp_path)
+    wed = date(2026, 11, 11)
+    assert [it["type"] for it in app.questions(wed)["items"]] == ["offday"]
+    assert app.questions(date(2026, 11, 14))["items"] == []              # never a weekend
+    assert app.normal_hours(date(2026, 11, 9)) == 37.5
+    app.set_day_off(wed, "vacation")
+    assert app.free(wed) == "Vacation" and app.questions(wed)["items"] == [] and app.gaps(wed) == []
+    assert app.normal_hours(date(2026, 11, 9)) == 30.0
+    assert app.statement(date(2026, 11, 9))["off"] == {"2026-11-11": "vacation"}
+    app.undo(app.last_undo)
+    assert app.free(wed) is None
+    app.skip(wed, "off:" + wed.isoformat())                                 # "I worked": not asked again
+    assert app.questions(wed)["items"] == []
+    with pytest.raises(ValueError):
+        app.set_day_off(wed, "holiday")
+
+
+def test_no_questions_on_a_red_day(tmp_path):
+    app = _file_app(tmp_path, [_ev("2026-05-14T07:00:00+00:00", 50), _ev("2026-05-14T09:00:00+00:00", 50)])
+    ascension = date(2026, 5, 14)
+    assert app.day(ascension) and app.free(ascension) == "Ascension Day"
+    assert app.questions(ascension)["items"] == [] and app.gaps(ascension) == []
+
+
+def test_days_off_over_http(tmp_path):
+    app = _two_days(tmp_path)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+    port = httpd.server_address[1]
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        wed = "2026-11-11"
+        assert "Were you off?" in LOCAL.open(f"{base}/day?date={wed}").read().decode()
+        assert post(f"{base}/api/dayoff", {"date": wed, "kind": "holiday"}, OK) == 400
+        assert post(f"{base}/api/dayoff", {"date": wed, "kind": "sickchild"}, OK) == 200
+        assert "Sick child." in LOCAL.open(f"{base}/day?date={wed}").read().decode()
+        assert ">Sick child</span>" in LOCAL.open(f"{base}/week?date={wed}").read().decode()
+        assert post(f"{base}/api/dayoff", {"date": wed, "kind": ""}, OK) == 200 and app.free(date(2026, 11, 11)) is None
+    finally:
+        httpd.shutdown()
+
+
+# ---- how often Synla is right --------------------------------------------------------------------------------------
+def test_one_spot_check_a_day_on_time_synla_sorted_itself(app, server):
+    base, _ = server
+    d = MONDAY.date()
+    for it in app.questions(d)["items"]:
+        if not it.get("spot"):
+            app.answer(d, it["ids"], *truth(it["title"]), how="window", asked=True)
+    q = app.questions(d)
+    spot = q["spot"]
+    assert not q["items"] and spot["spot"] and spot["code"].startswith("spot:")
+    assert app.guess(next(s for b in app.day(d) for s in b.segments if s.id == spot["ids"][0])).confidence >= 0.7
+    html = LOCAL.open(f"{base}/day?date={d}").read().decode()
+    assert "Is it right?" in html and "data-how='spot'" in html
+    body = {"date": str(d), "ids": spot["ids"], "how": "spot", "asked": True, "project": spot["guess"].project,
+            "kind": spot["guess"].kind}
+    assert post(f"{base}/api/answer", body, OK) == 200
+    assert app.questions(d)["spot"] is None                                 # one a day
+    a = app.accuracy()
+    assert (a["spot"], a["spot_right"]) == (1, 1)
+    assert "1 of 1</b> spot checks right" in LOCAL.open(f"{base}/week/indicators?date={d}").read().decode()
+    app.config["spotChecks"] = False
+    assert app.spot_window((MONDAY + timedelta(days=1)).date()) is None
+
+
+# ---- privacy ------------------------------------------------------------------------------------------------------------
+def test_names_and_email_addresses_are_hidden_before_anything_is_stored(tmp_path):
+    from synla.context import mask
+    assert mask("ms-teams.exe", "Chat | Kari Nordmann | Microsoft Teams") == "Chat | (person) | Microsoft Teams"
+    assert mask("ms-teams.exe", "Kari Nordmann, Ola Bjørn Hansen | Microsoft Teams") == "(person) | Microsoft Teams"
+    assert mask("ms-teams.exe", "Chat | Sales team | Microsoft Teams") == "Chat | Sales team | Microsoft Teams"
+    assert mask("OUTLOOK.EXE", "RE: Invoice from ola.hansen@example.com - Message (HTML)") == \
+        "RE: Invoice from (email) - Message (HTML)"
+    assert mask("msedge.exe", "Contact: Kari Nordmann - Dynamics 365 - Microsoft Edge").startswith("Contact: (person) -")
+    assert mask("msedge.exe", "Account: Havbruk Vest AS - Dynamics 365 - Microsoft Edge").startswith("Account: Havbruk")
+    store = Store(tmp_path)
+
+    class Probe:
+        def foreground(self): return ("ms-teams.exe", "Chat | Kari Nordmann | Microsoft Teams")
+        def idle_seconds(self): return 0.0
+        def mic_in_use(self): return False
+
+    clock = iter(range(1_800_000_000, 1_800_000_100, 5))
+    recorder.run(store, probe=Probe(), clock=lambda: next(clock), sleep=lambda s: None, polls=3, seal_weeks=False,
+                 remind=False)
+    db = recorder.connect(store)
+    titles = {protect.dec(r[0]) for r in db.execute("SELECT title FROM activity")}
+    db.close()
+    assert titles == {"Chat | (person) | Microsoft Teams"}
+
+
+def test_privacy_updates_only_add_to_your_private_list(tmp_path):
+    store = Store(tmp_path)
+    store.save_config({"privacy": {"skipTitleWords": ["Lønnsslipp"]}})
+    words = store.config()["privacy"]["skipTitleWords"]
+    assert "Lønnsslipp" in words and "nav.no" in words and "Fagforbundet" in words
+    assert store.config()["keepWindowDays"] == 14
+
+
+def test_the_week_offers_a_copy_not_work_email(app, server):
+    base, _ = server
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    app.seal(MONDAY.date())
+    html = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    assert "Save a copy" in html and "Send to yourself" not in html and "Email it" not in html
+    app.config["recordEmail"] = "me@example.com"
+    assert "Email it" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+
+
+# ---- the microphone ----------------------------------------------------------------------------------------------------
+def test_only_call_apps_holding_the_microphone_count():
+    assert recorder.is_call_app("MSTeams_8wekyb3d8bbwe")
+    assert recorder.is_call_app(r"C:#Users#una#AppData#Roaming#Zoom#bin#Zoom.exe")
+    assert not recorder.is_call_app(r"C:#Program Files#Google#Chrome#Application#chrome.exe")
+    assert not recorder.is_call_app("Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe")     # dictation and recordings
+
+    class InCall:
+        def foreground(self): return ("EXCEL.EXE", "Budget 2027.xlsx - Excel")
+        def idle_seconds(self): return 600.0
+        def mic_in_use(self): return True
+
+    assert recorder.sample(InCall(), {}) is None                    # not asked yet: no microphone check
+    assert recorder.sample(InCall(), {"detectCalls": True})[0] == "call"
+
+
+def test_synla_asks_once_about_the_microphone(tmp_path):
+    store = Store(tmp_path)
+    store.save_config({"source": "synla", "role": "specialist"})
+    app = Synla(store)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+    port = httpd.server_address[1]
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        assert "Count calls from the microphone?" in LOCAL.open(f"{base}/day").read().decode()
+        assert post(f"{base}/api/settings", {"detectCalls": False}, OK) == 200
+        assert store.config()["detectCalls"] is False
+        assert "Count calls from the microphone?" not in LOCAL.open(f"{base}/day").read().decode()
+        assert "Microphone check for calls: off" in LOCAL.open(f"{base}/data").read().decode()
+    finally:
+        httpd.shutdown()
+
+
+
+# ---- reporting the week -------------------------------------------------------------------------------------------------
+def test_the_week_goes_to_a_reporting_system_with_your_codes(app, server):
+    base, _ = server
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    friday = (MONDAY + timedelta(days=4)).date()
+    app.set_day_off(friday, "vacation")
+    body = {"projects": {"Data platform": " 1001 ", "Not a project": "9"}, "absence": {"vacation": "FERIE", "x": "1"}}
+    assert post(f"{base}/api/codes", body, OK) == 200
+    c = app.store.config()
+    assert c["projects"]["Data platform"]["code"] == "1001" and c["absenceCodes"] == {"vacation": "FERIE"}
+    plain = LOCAL.open(f"{base}/export.csv?date={MONDAY.date()}").read().decode()
+    rows = list(csv.reader(io.StringIO(plain)))
+    assert rows[0] == ["date", "code", "project", "hours"]
+    assert [friday.isoformat(), "FERIE", "Vacation", "7.5"] in rows
+    assert any(r[1] == "1001" and r[2] == "Data platform" for r in rows[1:])
+    excel = LOCAL.open(f"{base}/export.csv?date={MONDAY.date()}&format=excel").read().decode("utf-8")
+    assert excel.startswith("\ufeffdate;code;project;hours") and f"{friday.isoformat()};FERIE;Vacation;7,5" in excel
+    page = LOCAL.open(f"{base}/week/timesheet?date={MONDAY.date()}").read().decode()
+    assert "Download for Excel" in page and "FERIE" in page and "1001" in page

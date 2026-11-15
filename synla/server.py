@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time as clock
 from datetime import date, datetime, time, timedelta, timezone
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from . import record, recorder, report, roles, workload
 from .classify import ASK_BELOW
 from .context import d365, outlook_item, strip_app
+from .app import OFF
 from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN
 
 KEYS = "qwertyui"                         # keys for the kinds of work you see, in order
@@ -103,6 +105,9 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px var(--c)}
 .chip.ghost{color:var(--muted);border-style:dashed;padding-left:14px}
 .gap.isnotwork .kinds{opacity:.35;pointer-events:none}
+td.code{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}tr.off td{color:var(--muted)}
+.quiet .links{display:flex;gap:18px;flex-wrap:wrap;justify-content:flex-end}
+.stack.free{background:repeating-linear-gradient(135deg,var(--track) 0 6px,var(--paper) 6px 12px)}
 .ismeeting{display:inline-flex;align-items:center;gap:9px;font-size:.95rem;cursor:pointer;padding-top:2px}
 .ismeeting input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
 .push{margin:2px 0 12px;padding:10px 14px;border-radius:10px;background:var(--paper);border-left:3px solid var(--sun);font-size:.95rem}
@@ -112,7 +117,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .rolecard{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;text-align:left;background:var(--surface);
  border:1.5px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer;color:var(--ink)}
 .rolecard:hover{border-color:var(--muted)}.rolecard.on{border-color:var(--sea);box-shadow:inset 0 0 0 1px var(--sea)}
-.rolecard small{display:block;color:var(--muted);margin-top:4px;line-height:1.35}
+.rolecard small{display:block;color:var(--muted);margin-top:4px;line-height:1.35}.rolecard small.planned{color:var(--ink);margin-top:6px}
 .knames{display:grid;gap:8px;max-width:620px;margin-top:8px}
 .kname{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;align-items:center;font-size:.92rem;color:var(--muted)}
 .kname input{font:inherit;width:100%;min-width:0;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
@@ -242,8 +247,13 @@ async function saveGap(card){
  await refresh();
  toast(body.notWork?'Saved: not work.':'Saved: '+body.project+', '+k.dataset.label.toLowerCase()+(body.meeting?', meeting':'')+', '+body.start+' to '+body.end+'.',res.undo);
 }
+async function saveOff(card,kind){
+ const res=await post('/api/dayoff',{date:card.dataset.date,kind:kind});if(!res)return;
+ await refresh();toast(kind?'Saved: '+$('.chip[data-v="'+kind+'"]',card).dataset.label.toLowerCase()+'.':'Saved: not a day off.',res.undo);
+}
 async function save(card){
  if(card.dataset.type==='gap')return saveGap(card);
+ if(card.dataset.type==='offday'){const o=$('.chips.p .chip.on',card);if(!o){toast('Pick the kind of day, or I worked.');return}return saveOff(card,o.dataset.v)}
  const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
  if(!p){toast('Pick a '+WORD+' first.');return}
  if(!k){toast('Pick a kind of work.');return}
@@ -254,7 +264,7 @@ async function save(card){
 }
 async function skip(card){
  const res=await post('/api/skip',{date:card.dataset.date,code:card.dataset.code});
- if(res){await refresh();toast("Skipped. It keeps Synla's best guess.",res.undo)}
+ if(res){await refresh();toast(card.dataset.type==='offday'?'OK, not a day off.':"Skipped. It keeps Synla's best guess.",res.undo)}
 }
 const NEWP="<button type='button' class='chip ghost' data-newproject>+ New "+WORD+"</button>";
 function newProject(btn){
@@ -302,6 +312,9 @@ document.addEventListener('click',async e=>{
  if(b=on('[data-savenames]')){const names={};$$('.kindname').forEach(x=>names[x.dataset.kind]=x.value);
   if(await post('/api/settings',{kindNames:names}))location.reload();return}
  if(b=on('[data-save]')){save(b.closest('.ask'));return}
+ if(b=on('[data-setoff]')){const box=b.closest('section')||b;let kind='';
+  if(b.dataset.setoff==='pick'){const o=$('.chips.o .chip.on',box);if(!o){toast('Pick the kind of day.');return}kind=o.dataset.v}
+  const res=await post('/api/dayoff',{date:b.dataset.date,kind:kind});if(res){await refresh();toast(kind?'Saved: day off.':'Saved: not a day off.',res.undo)}return}
  if(b=on('[data-skip]')){skip(b.closest('.ask'));return}
  if(b=on('[data-cancel]')){$('#editor').hidden=true;return}
  if(b=on('[data-change]')){change(b.closest('.crow'));return}
@@ -319,6 +332,9 @@ document.addEventListener('click',async e=>{
   if(b.dataset.copy==='tsv'){const sep=(1.5).toLocaleString().charAt(1);t=t.replace(/(\d)\.(\d)/g,'$1'+sep+'$2')}
   await navigator.clipboard.writeText(t);toast('Copied.');return}
  if(b=on('[data-saveemail]')){if(await post('/api/settings',{recordEmail:$('#email').value})){await refresh();toast('Saved.')}return}
+ if(b=on('[data-savecodes]')){const projects={},absence={};$$('.pcode').forEach(x=>projects[x.dataset.project]=x.value);
+  $$('.acode').forEach(x=>absence[x.dataset.kind]=x.value);if(await post('/api/codes',{projects,absence})){await refresh();toast('Codes saved.')}return}
+ if(b=on('[data-setting]')){const v=b.dataset.value==='1';if(await post('/api/settings',{[b.dataset.setting]:v})){await refresh();toast(v?'Turned on.':'Turned off.')}return}
  if(b=on('[data-gaps]')){if(await post('/api/settings',{askAboutGaps:b.dataset.gaps==='1'})){await refresh();toast(b.dataset.gaps==='1'?'Synla asks about time away again.':'No more questions about time away.')}return}
  if(b=on('[data-delete]')){if(confirm(b.dataset.confirm)&&await post('/api/delete',{what:b.dataset.delete})){await refresh();toast('Deleted.')}return}
  if(b=on('[data-print]')){window.print();return}
@@ -557,7 +573,7 @@ def timeline(app, d: date, bl: list, asked: list | None = None) -> str:
         first, last = min(s.start for s in segs), max(s.end for s in segs)
         h0 = min(start_h, first.hour)
         h1 = max(end_h, 24 if last.date() > d else last.hour + (1 if last.minute or last.second else 0))
-    t0 = datetime.combine(d, time(h0)).astimezone()
+    t0 = datetime.combine(d, time(h0), segs[0].start.tzinfo) if segs else datetime.combine(d, time(h0)).astimezone()
     span = (h1 - h0) * 3600
     bars = []
     for b in bl:
@@ -594,17 +610,58 @@ def ask_card(app, d: date, q: dict) -> str:
     meta = [where(it["app"], it["title"]), when_text(it["spans"])]
     hint = (f"Synla thinks {escape(known)}{why(g)}." if known
             else "Synla has no guess yet. Your answer teaches it for next time.")
+    spot = it.get("spot")
+    if spot:
+        hint = ("One check a day on time Synla sorted on its own, picked at random. It shows how often Synla is right "
+                "when it doesn't ask.")
+    question = ("Synla sorted this on its own. Is it right?" if spot else
+                "What was this meeting for?" if it["call"] else "What was this?")
+    head = "Spot check" if spot and n == 1 else COUNT.get(n, f"{n} quick questions")
     dots = "".join(f"<i class='{'on' if i == 0 else ''}'></i>" for i in range(min(n, 8)))
-    return f"""<section class='ask q' data-date='{d}' data-ids='{ids_attr(it["ids"])}' data-how='window' data-asked='1'
- data-code='{escape(it["code"])}'>
-<div class='askhead'><span>{COUNT.get(n, f"{n} quick questions")}</span><span class='prog'>{dots}</span></div>
-<h2>{"What was this meeting for?" if it["call"] else "What was this?"}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
+    return f"""<section class='ask q' data-date='{d}' data-ids='{ids_attr(it["ids"])}' data-how='{"spot" if spot else "window"}'
+ data-asked='1' data-code='{escape(it["code"])}'>
+<div class='askhead'><span>{head}</span><span class='prog'>{dots}</span></div>
+<h2>{question}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
 <div class='meta'>{escape(" · ".join(meta))}</div>
 <div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known)}</div></div>
 <div class='hint'>{hint}</div>
 <div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, g.kind if g.kind in KINDS else "project")}</div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
 <button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
+
+
+def off_chips(current: str | None = None, keys: bool = True) -> str:
+    return "".join(f"<button type='button' class='chip{' on' if k == current else ''}' data-v='{k}' data-label='{v}' "
+                   f"aria-pressed='{'true' if k == current else 'false'}'>{f'<span class=key>{i}</span>' if keys else ''}{v}</button>"
+                   for i, (k, v) in enumerate(OFF.items(), 1))
+
+
+def offday_card(app, d: date, q: dict) -> str:
+    it = q["items"][0]
+    return f"""<section class='ask q' data-type='offday' data-date='{d}' data-code='{escape(it["code"])}'>
+<div class='askhead'><span>One quick question</span></div>
+<h2>Nothing was recorded on {d:%A} {d.day} {d:%B}.</h2><div class='what'>Were you off?</div>
+<div class='row'><span class='lab'>Day off</span><div class='chips p'>{off_chips()}</div></div>
+<div class='hint'>Only the kind of day is kept, never a reason. It goes into your week and the timesheet.</div>
+<div class='act'><button type='button' class='skip' data-skip>I worked <span class='key'>Esc</span></button>
+<button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
+
+
+def free_card(app, d: date) -> str:
+    """A red day or a day off: nothing to ask."""
+    off = app.day_off(d)
+    if off:
+        return (f"<section class='done'><span class='ok'>✓</span><div><b>{OFF[off]}.</b><p>Synla asks nothing about this "
+                f"day. <button class='link' data-setoff='' data-date='{d}'>Not a day off</button></p></div></section>")
+    return (f"<section class='done'><span class='ok'>✓</span><div><b>{escape(app.red_day(d))}.</b><p>A red day, so "
+            f"Synla asks nothing about it.</p></div></section>")
+
+
+def dayoff_section(app, d: date) -> str:
+    return f"""<section class='panel away' id='dayoff' data-panel hidden data-date='{d}'><h3>Day off</h3>
+<p class='note'>A whole day of vacation, sick leave, sick child or time off. Only the kind of day is kept.</p>
+<div class='row'><span class='lab'>{d:%A}</span><div class='chips o'>{off_chips(app.day_off(d), keys=False)}</div></div>
+<div class='act'><button type='button' class='save' data-setoff='pick' data-date='{d}'>Save</button></div></section>"""
 
 
 MEETING_TICK = ("<div class='row kinds'><span class='lab'></span><label class='ismeeting'><input type='checkbox' class='meeting' "
@@ -706,6 +763,19 @@ kept, no notes.</p>
 <div class='act'><button type='button' class='save' data-addtime>Add</button></div></section>"""
 
 
+def mic_card(app) -> str:
+    """Asked once, on a computer where Synla's own recorder runs: count calls from the microphone or not."""
+    if "detectCalls" in app.config or app.config.get("source", "auto") not in ("auto", "synla") or \
+            (sys.platform != "win32" and app.config.get("source") != "synla"):
+        return ""
+    return ("<section class='panel rolepick'><b>Count calls from the microphone?</b> <span class='note'>When Teams, Zoom, "
+            "Webex, Slack or Skype is using the microphone, Synla counts the time as a meeting, also when another window "
+            "is in front. It only asks Windows which app holds the microphone, the same as the microphone icon in the "
+            "taskbar. It never hears anything.</span><div class='buttons'><button class='btn' data-setting='detectCalls' "
+            "data-value='1'>Yes, count calls</button><button class='btn' data-setting='detectCalls' data-value='0'>No"
+            "</button></div></section>")
+
+
 def role_card(app) -> str:
     """Shown once, until you pick a role."""
     if app.config.get("role"):
@@ -721,15 +791,19 @@ def role_page(app, token: str) -> str:
     cards = "".join(
         f"<button class='rolecard{' on' if k == current else ''}' data-role='{k}'><b>{escape(r['name'])}</b>"
         f"<small>{escape(r['word'][1])}. "
-        + escape(", ".join(roles.say({**plain, "role": k}, x) for x in r["kinds"])) + "</small></button>"
+        + escape(", ".join(roles.say({**plain, "role": k}, x) for x in r["kinds"])) + "</small>"
+        + (f"<small class='planned'>Planned in this job: "
+           f"{escape(', '.join(roles.say({**plain, 'role': k}, x) for x in r['planned']))}</small>" if r.get("planned") else "")
+        + "</button>"
         for k, r in roles.ROLES.items())
     own = app.config.get("kindNames") or {}
     names = "".join(
         f"<label class='kname'><span>{escape(roles.say(plain, k))}</span><input class='kindname' data-kind='{k}' maxlength='40' "
         f"value='{escape(own.get(k, '') if isinstance(own.get(k), str) else '', quote=True)}' "
         f"placeholder='{escape(roles.say(plain, k), quote=True)}'></label>" for k in roles.role(app.config)["kinds"])
-    body = f"""<h1>Your role</h1><p class='sub'>It picks the words and the choices you see. Underneath, every role counts the
-same way, so the workload numbers, the record book and earlier weeks mean the same whatever you pick.</p>
+    body = f"""<h1>Your role</h1><p class='sub'>It picks the words, the choices you see, and which kinds of work count as
+planned in your job. Underneath, the kinds of work are the same for every role, so the record book and earlier weeks
+keep their meaning.</p>
 <section class='panel'><div class='roles'>{cards}</div></section>
 <h2>Your own words</h2><section class='panel'><p class='note'>Call a kind of work what you call it, for example Error
 handling instead of Firefighting. Leave a box empty to use your role's word.</p><div class='knames'>{names}</div>
@@ -755,20 +829,26 @@ def today_page(app, d: date, token: str) -> str:
             f"{day_title(d)}<a class='step{' off' if nxt > app.last_day() else ''}' href='/day?date={nxt}' aria-label='Next day'>›</a>"
             f"</div><div class='big'>{hm(nums['total']) if bl else '0 h'}</div></div>{wl}</div>")
     if q["items"]:
-        card = (gap_card if q["items"][0]["type"] == "gap" else ask_card)(app, d, q)
+        card = {"gap": gap_card, "offday": offday_card}.get(q["items"][0]["type"], ask_card)(app, d, q)
+    elif q.get("spot") and not q["waiting"]:
+        card = ask_card(app, d, {"items": [q["spot"]]})
+    elif app.free(d):
+        card = free_card(app, d)
     else:
         card = done_card(app, d, q, nums, bl)
     check = ""
     if bl:
         label = (f"Synla sorted {hm(nums['sure'])} on its own. Check ›" if nums["sure"] >= 1 else "See the whole day ›")
         check = f"<button class='link' data-toggle='check'>{label}</button>"
-    quiet = f"<div class='quiet'>{check or '<span></span>'}<button class='link' data-toggle='away'>+ Time away from the computer</button></div>"
-    first = q["items"][0] if q["items"] else None
+    off = "" if app.free(d) or d.weekday() >= 5 else "<button class='link' data-toggle='dayoff'>+ Day off</button>"
+    quiet = (f"<div class='quiet'>{check or '<span></span>'}<span class='links'>{off}"
+             f"<button class='link' data-toggle='away'>+ Time away from the computer</button></span></div>")
+    first = q["items"][0] if q["items"] else (q["spot"] if q.get("spot") and not q["waiting"] else None)
     asked = None
-    if first:
+    if first and first["type"] != "offday":
         asked = [(first["start"], first["end"])] if first["type"] == "gap" else [tuple(x) for x in stretches(first["spans"])]
-    body = (role_card(app) + head + (timeline(app, d, bl, asked) if bl else "") + card + quiet
-            + (check_section(app, d, bl) if bl else "") + away_section(app, d))
+    body = (role_card(app) + mic_card(app) + head + (timeline(app, d, bl, asked) if bl else "") + card + quiet
+            + (check_section(app, d, bl) if bl else "") + away_section(app, d) + dayoff_section(app, d))
     return page(app, "Today" if d == app.today() else day_title(d), body, token, "today" if d == app.today() else "")
 
 
@@ -790,7 +870,7 @@ def week_view(app, monday: date) -> dict | None:
     status = app.week_status(monday)
     v = {"monday": monday, "status": status, "days": {}, "projects": {}, "top": [], "live": True}
     if days:
-        s = report.summary(days, app.workday)
+        s = report.summary(days, app.workday, roles.unplanned(app.config))
         assessed = workload.assess(workload.measure(days, s), app.config)
         for d, bl in sorted(days.items()):
             per = {}
@@ -826,7 +906,7 @@ def week_view(app, monday: date) -> dict | None:
         v["days"][d] = {"hours": x["hours"], "projects": per, "early": early, "late": late, "urgent": urgent,
                         "pushed": pushed}
     v["projects"] = {(NOT_SORTED if p in ("Unsorted", UNKNOWN) else p): h for p, h in st["projects"].items()}
-    inv = {k: h for k, h in st.get("kinds", {}).items() if k in INVISIBLE}
+    inv = {k: h for k, h in st.get("kinds", {}).items() if k in roles.unplanned(app.config)}
     total = st["totalHours"]
     v.update(hours=total, unplanned=sum(inv.values()), share=sum(inv.values()) / total if total else 0.0, live=False,
              assessed=workload.assess(st.get("workload", {}), app.config),
@@ -875,7 +955,7 @@ def record_panel(app, monday: date, status: dict) -> str:
     if status["state"] == "open":
         by_synla = app.statement(monday)["unconfirmedHours"]
         note = (f"Synla sorted {by_synla:.1f} h on its own, and the record says so. " if by_synla else "") + \
-               "Weeks you don't seal are sealed automatically a week after they end."
+               spot_line(app) + "Weeks you don't seal are sealed automatically a week after they end."
         return (f"<section class='panel sealed'><span class='ok open'></span><div><b>Not sealed yet.</b> "
                 f"{'Seal it to keep this week as it is.' if ended else 'Seal it when the week is done, or now.'}"
                 f"<div class='note'>{note}</div></div><button class='save' data-seal='{monday}'>Seal this week</button></section>")
@@ -891,10 +971,9 @@ def record_panel(app, monday: date, status: dict) -> str:
     version = f", version {seal['version']}" if seal["version"] > 1 else ""
     return (f"<section class='panel sealed'><span class='ok'>✓</span><div><b>Sealed in your record book</b>{by} {on}{version}"
             f"<div class='fp'>Fingerprint {seal['fingerprint'][:16]}…</div>"
-            f"<div class='mini'><button class='link' data-copy='mailtext'>Copy text</button> · "
-            f"<a href='/record/statement.json?seq={seal['seq']}'>Download</a>"
-            f"{'' if to else ' · <a href=/record>Add your private email</a>'}</div></div>"
-            f"<a class='save' href='{escape(record.mailto(to, seal), quote=True)}'>Send to yourself</a>"
+            f"<div class='mini'><button class='link' data-copy='mailtext'>Copy text</button>"
+            f"{f' · <a href={chr(39)}{escape(record.mailto(to, seal), quote=True)}{chr(39)}>Email it</a>' if to else ''}</div></div>"
+            f"<a class='save' href='/record/statement.json?seq={seal['seq']}'>Save a copy</a>"
             f"<textarea id='mailtext' class='offscreen' aria-hidden='true' tabindex='-1'>{escape(text)}</textarea></section>")
 
 
@@ -921,8 +1000,9 @@ def week_page(app, d: date, token: str) -> str:
     for day in shown_days:
         x = v["days"].get(day)
         if not x:
-            cols.append(f"<a class='col' href='/day?date={day}'><div class='h'><span>-</span></div><div class='stack'></div>"
-                        f"<div class='d'>{day:%a}</div></a>")
+            why = app.free(day)
+            cols.append(f"<a class='col' href='/day?date={day}'><div class='h'><span>{escape(why) if why else '-'}</span></div>"
+                        f"<div class='stack{' free' if why else ''}'></div><div class='d'>{day:%a}</div></a>")
             continue
         parts = "".join(
             f"<span class='{'uns' if p == NOT_SORTED else ''}' style='height:{x['projects'][p] / scale * 100:.1f}%;"
@@ -970,28 +1050,74 @@ def timesheet_rows(app, monday: date) -> dict:
     return out
 
 
+def project_code(app, p: str) -> str:
+    v = app.config.get("projects", {}).get(p)
+    return str(v.get("code", "")) if isinstance(v, dict) else ""
+
+
+def report_lines(app, monday: date) -> list:
+    """The week as lines for a reporting system such as Visma: one line per day and project, with your code for it,
+    and one line per day off with your absence code. Hours are rounded the way the timesheet rounds them."""
+    ts = timesheet_rows(app, monday)
+    codes = app.config.get("absenceCodes") or {}
+    day_hours = round(float(app.config.get("weeklyHours", 37.5)) / 5, 2)
+    lines = []
+    for i in range(7):
+        day = monday + timedelta(days=i)
+        off = app.day_off(day)
+        if off and day.weekday() < 5:
+            lines.append({"date": day, "code": str(codes.get(off, "")), "what": OFF[off], "hours": day_hours, "off": True})
+        for p, h in ts.get(day, {}).items():
+            lines.append({"date": day, "code": project_code(app, p), "what": p, "hours": h, "off": False})
+    return lines
+
+
 def timesheet_page(app, d: date, token: str) -> str:
     monday = monday_of(d)
-    ts = timesheet_rows(app, monday)
-    projects = sorted({p for v in ts.values() for p in v})
-    head = "".join(f"<th class='num'>{day:%a %d}</th>" for day in ts)
-    rows = "".join(f"<tr><td>{escape(p)}</td>" + "".join(f"<td class='num'>{ts[day][p]:g}</td>" if ts[day].get(p)
-                                                         else "<td></td>" for day in ts)
-                   + f"<td class='num'><b>{sum(ts[day].get(p, 0) for day in ts):g}</b></td></tr>" for p in projects)
-    totals = ("<tr class='total'><td>Total</td>" + "".join(f"<td class='num'>{sum(ts[day].values()):g}</td>" for day in ts)
-              + f"<td class='num'>{sum(sum(x.values()) for x in ts.values()):g}</td></tr>") if ts else ""
-    tsv = "\n".join(["Project\t" + "\t".join(f"{day:%a %d.%m}" for day in ts) + "\tTotal"] +
-                    [f"{p}\t" + "\t".join(f"{ts[day].get(p, 0):g}" for day in ts)
-                     + f"\t{sum(ts[day].get(p, 0) for day in ts):g}" for p in projects])
-    table = (f"<section class='panel'><table><tr><th>{roles.word(app.config)}</th>{head}<th class='num'>Total</th></tr>{rows}{totals}</table></section>"
-             if ts else "<section class='done'><span class='ok open'></span><div><b>Nothing recorded this week.</b></div></section>")
+    lines = report_lines(app, monday)
+    days = sorted({x["date"] for x in lines})
+    keys = list(dict.fromkeys((x["code"], x["what"], x["off"]) for x in sorted(lines, key=lambda x: (x["off"], x["what"]))))
+    cell = {(x["code"], x["what"], x["off"], x["date"]): x["hours"] for x in lines}
+    head = "".join(f"<th class='num'>{day:%a %d}</th>" for day in days)
+    rows = "".join(f"<tr{' class=off' if off else ''}><td class='code'>{escape(code)}</td><td>{escape(what)}</td>"
+                   + "".join(f"<td class='num'>{cell[(code, what, off, day)]:g}</td>" if cell.get((code, what, off, day))
+                             else "<td></td>" for day in days)
+                   + f"<td class='num'><b>{sum(cell.get((code, what, off, day), 0) for day in days):g}</b></td></tr>"
+                   for code, what, off in keys)
+    totals = ("<tr class='total'><td></td><td>Total</td>" + "".join(
+        f"<td class='num'>{sum(x['hours'] for x in lines if x['date'] == day):g}</td>" for day in days)
+        + f"<td class='num'>{sum(x['hours'] for x in lines):g}</td></tr>") if lines else ""
+    tsv = "\n".join(["Code\tWhat\t" + "\t".join(f"{day:%a %d.%m}" for day in days) + "\tTotal"] +
+                    [f"{code}\t{what}\t" + "\t".join(f"{cell.get((code, what, off, day), 0):g}" for day in days)
+                     + f"\t{sum(cell.get((code, what, off, day), 0) for day in days):g}" for code, what, off in keys])
+    table = (f"<section class='panel'><table><tr><th>Code</th><th>{roles.word(app.config)}</th>{head}"
+             f"<th class='num'>Total</th></tr>{rows}{totals}</table></section>"
+             if lines else "<section class='done'><span class='ok open'></span><div><b>Nothing recorded this week.</b></div></section>")
     body = f"""<h1>Timesheet</h1><p class='sub'>{week_title(monday)} · <a href='/week?date={monday}'>back to the week</a></p>
-{table}<div class='buttons noprint'><a class='btn' href='/export.csv?date={monday}'>Download CSV</a>
-<button class='btn' data-copy='tsv'>Copy table</button><button class='btn' data-print>Print</button></div>
+{table}<div class='buttons noprint'><a class='btn' href='/export.csv?date={monday}&amp;format=excel'>Download for Excel</a>
+<a class='btn' href='/export.csv?date={monday}'>Download CSV</a><button class='btn' data-copy='tsv'>Copy table</button>
+<button class='btn' data-toggle='codes'>Codes</button><button class='btn' data-print>Print</button></div>
 <textarea id='tsv' class='offscreen' aria-hidden='true' tabindex='-1'>{escape(tsv)}</textarea>
-<p class='note'>Hours rounded to {app.config.get('roundMinutes', 15)} minutes per project and day. Time you never answered uses
-Synla's best guess. Copy table pastes straight into Excel.</p>"""
+{codes_section(app, sorted({x["what"] for x in lines if not x["off"]}))}
+<p class='note'>Hours rounded to {app.config.get('roundMinutes', 15)} minutes per {roles.word(app.config).lower()} and day.
+A day off counts as {round(float(app.config.get('weeklyHours', 37.5)) / 5, 2):g} hours. Time you never answered uses Synla's
+best guess. Download for Excel opens in Excel with Norwegian settings. Download CSV is for reporting systems that import
+files: one line per day and {roles.word(app.config).lower()}, with your code.</p>"""
     return page(app, "Timesheet", body, token)
+
+
+def codes_section(app, projects: list) -> str:
+    """Your codes in the reporting system, for example Visma: per project, and per kind of day off."""
+    own = app.config.get("absenceCodes") or {}
+    rows = "".join(f"<label class='kname'><span>{escape(p)}</span><input class='pcode' data-project='{escape(p, quote=True)}' "
+                   f"maxlength='20' value='{escape(project_code(app, p), quote=True)}'></label>"
+                   for p in projects if p in app.projects)
+    rows += "".join(f"<label class='kname'><span>{v}</span><input class='acode' data-kind='{k}' maxlength='20' "
+                    f"value='{escape(str(own.get(k, '')), quote=True)}'></label>" for k, v in OFF.items())
+    return (f"<section class='panel noprint' id='codes' data-panel hidden><h3>Codes</h3><p class='note'>The project and "
+            f"absence codes your reporting system uses, so the lines match what you type in or import.</p>"
+            f"<div class='knames'>{rows}</div><div class='buttons'><button class='btn' data-savecodes>Save</button></div>"
+            f"</section>")
 
 
 def indicators_page(app, d: date, token: str) -> str:
@@ -1022,8 +1148,33 @@ two indicators are red or the score reaches 6, and yellow when one is red or the
 "indicators" in config.json.</p>
 <h2>The last 8 weeks</h2><div class='tiles'>{tiles}</div>
 <h2 id='unplanned'>Where the unplanned work came from</h2>
-<section class='panel'>{push_note(app, v)}{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}</section>"""
+<section class='panel'>{push_note(app, v)}{f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}</section>
+<h2>How often Synla is right</h2><section class='panel'>{accuracy_panel(app)}</section>"""
     return page(app, "Workload", body, token)
+
+
+def spot_line(app) -> str:
+    a = app.accuracy()
+    return f"In spot checks it was right {a['spot_right']} of {a['spot']} times. " if a.get("spot") else ""
+
+
+def accuracy_panel(app) -> str:
+    """From your answers of the last 90 days. Spot checks are picked at random from time Synla sorted on its own, so
+    they show how much to trust that time. Questions are about unsure time, so Synla's guesses there are often wrong."""
+    a = app.accuracy()
+    rows = []
+    if a.get("spot"):
+        rows.append(f"<li><b>{a['spot_right']} of {a['spot']}</b> spot checks right ({a['spot_right'] / a['spot']:.0%}). "
+                    f"This is how much to trust the time Synla sorts on its own.</li>")
+    if a.get("asked"):
+        rows.append(f"<li><b>{a['asked_right']} of {a['asked']}</b> guesses right when Synla asked. It asks when it is "
+                    f"unsure, so these are the hard ones.</li>")
+    if a.get("bulk"):
+        rows.append(f"<li>{a['bulk']} approved in one click, {a['bulk_changed']} of them changed later. Not counted as "
+                    f"right, since you didn't check them one by one.</li>")
+    if not rows:
+        return "<p class='note'>No answers yet. One spot check a day shows how often Synla is right when it doesn't ask.</p>"
+    return f"<ul class='plain'>{''.join(rows)}</ul>"
 
 
 # ---- the record book and the year ------------------------------------------------------------------------------------
@@ -1061,9 +1212,10 @@ def record_page(app, token: str) -> str:
 <section class='panel'><h3>Sealed weeks</h3><table><tr><th>Week</th><th>Sealed</th><th class='num'>Version</th>
 <th class='num'>Hours</th><th class='num'>By Synla</th><th>Fingerprint</th><th></th></tr>{rows or "<tr><td colspan=7 class='note'>None yet.</td></tr>"}</table>
 <div class='buttons'>{''.join(f"<a class='btn' href='/year?y={y}'>Year report {y}</a>" for y in years)}</div></section>
-<section class='panel noprint'><h3>Your private email</h3><p class='note'>For sending each week's fingerprint to yourself.
-Synla never sends anything itself: it opens a ready email in your mail app, and you press send. Use a private address,
-not your work email.</p><div class='field'><input type='email' id='email' value='{escape(to, quote=True)}' placeholder='you@example.com'
+<section class='panel noprint'><h3>Your private email</h3><p class='note'>For emailing each week's fingerprint to
+yourself. Synla never sends anything itself: it opens a ready email in your mail program, and you press send. If that
+program is your work email, the company keeps a copy of what you send. Saving a copy, or pasting the text into your
+private email, keeps it out of work email.</p><div class='field'><input type='email' id='email' value='{escape(to, quote=True)}' placeholder='you@example.com'
 aria-label='Private email'><button class='btn' data-saveemail>Save</button></div></section>
 <h2>How it works</h2><section class='panel'><ul class='plain'>
 <li>Each week's record holds the times, projects and kinds of work, and who decided each one: you, time you added, or
@@ -1071,8 +1223,8 @@ Synla's guess. It holds no window names.</li>
 <li>Each record gets a fingerprint made from the record and the fingerprint before it. Changing an old record breaks the
 chain, and the check above shows where.</li>
 <li>You can still correct a sealed week. The correction becomes a new version, and the old one stays.</li>
-<li>The chain lives on this computer, so on its own it can't rule out that someone rebuilt it. The email you send yourself
-each week can: its date is kept by your email provider, outside Synla and outside your employer.</li>
+<li>The chain lives on this computer, so on its own it can't rule out that someone rebuilt it. A copy you keep somewhere
+else can, for example in your private email, where your provider keeps the date.</li>
 <li>Records are kept for {app.config.get('keepRecordYears', 5):g} years. This is your own record. Your employer keeps the
 official record of working hours.</li></ul></section>"""
     return page(app, "Record book", body, token, "record")
@@ -1146,12 +1298,20 @@ def data_page(app, token: str) -> str:
 {'Window names are encrypted with your Windows login.' if i['encrypted'] else 'Only your account can open the folder.'}</p></section>
 <section class='panel'><h3>Recording: {recording}</h3><div class='buttons'><button class='btn' data-pause='60'>Pause 1 hour</button>
 <button class='btn' data-pause='rest'>Pause until tomorrow</button><button class='btn' data-pause='0'>Resume</button></div>
-<p class='note'>Microphone check for calls: {'on' if i['detectCalls'] else 'off'}. Synla only asks Windows whether an app is
-using the microphone, never what is said.</p></section>
+</section>
+<section class='panel'><h3>Microphone check for calls: {'on' if i['detectCalls'] else 'off'}</h3><p class='note'>When it is
+on, Synla asks Windows whether Teams, Zoom, Webex, Slack or Skype is using the microphone, the same as the microphone icon
+in the taskbar, so a call counts as a meeting even when another window is in front. It never touches the microphone or
+any sound. Dictation and browser tabs do not count.</p><div class='buttons'><button class='btn' data-setting='detectCalls'
+data-value='{0 if i['detectCalls'] else 1}'>{'Turn off' if i['detectCalls'] else 'Turn on'}</button></div></section>
 <section class='panel'><h3>Questions about time away: {'on' if i['askAboutGaps'] else 'off'}</h3>
 <p class='note'>When you are away from the computer for 30 minutes or more, starting and ending inside your workday, Synla
 asks what it was. Never about mornings, evenings, weekends, lunch or paused time. Not work is enough, and Synla never asks
 why.</p><div class='buttons'><button class='btn' data-gaps='{0 if i['askAboutGaps'] else 1}'>{'Turn off' if i['askAboutGaps'] else 'Turn on'}</button></div></section>
+<section class='panel'><h3>Daily spot check: {'on' if i['spotChecks'] else 'off'}</h3>
+<p class='note'>Once a day, Synla asks about one stretch it sorted on its own, picked at random. Your answers show how often
+Synla is right when it doesn't ask, under Workload.</p><div class='buttons'><button class='btn' data-setting='spotChecks'
+data-value='{0 if i['spotChecks'] else 1}'>{'Turn off' if i['spotChecks'] else 'Turn on'}</button></div></section>
 <section class='panel'><h3>What is stored</h3><table><tr><th>What</th><th class='num'>Amount</th><th>Oldest</th><th>Kept for</th></tr>
 <tr><td>Window names and times from the recorder</td><td class='num'>{i['recorder_rows']:,}</td><td class='nw'>{_when(i['recorder_first'])}</td><td>{i['keepWindowDays']} days</td></tr>
 <tr><td>Your answers: project and kind for each stretch of time</td><td class='num'>{i['answers']:,}</td><td class='nw'>{_when(i['answers_first'])}</td><td>{i['keepDays']} days</td></tr>
@@ -1175,19 +1335,24 @@ Change the list in config.json.</li></ul></section>
 <section class='panel'><h3>Built for you, not for monitoring</h3><ul class='plain'>
 <li>No account, server or admin mode, and no way to collect or compare data from several people.</li>
 <li>Nothing leaves this computer unless you copy it out yourself, for example the weekly summary.</li>
-<li>Every number comes from your own recording and your own answers, and you can see and delete all of it.</li></ul></section>"""
+<li>Every number comes from your own recording and your own answers, and you can see and delete all of it.</li>
+<li>Other people's names and email addresses in window titles are hidden before anything is stored: a chat with a person
+is kept as "Chat | (person)".</li>
+<li>On a work computer, IT can in principle reach any file on it, as with all software. Synla has no view for a manager,
+a colleague or HR.</li></ul></section>"""
     return page(app, "Your data", body, token)
 
 
-def csv_text(app, d: date) -> str:
-    ts = timesheet_rows(app, monday_of(d))
+def csv_text(app, d: date, excel: bool = False) -> str:
+    """One line per day and project, and per day off. excel: semicolons and decimal commas, as Excel with Norwegian
+    settings expects, with a byte order mark so æ, ø and å come out right."""
     f = io.StringIO()
-    wr = csv.writer(f)
-    wr.writerow(["date", "project", "hours"])
-    for day, rows in ts.items():
-        for p, h in rows.items():
-            wr.writerow([day.isoformat(), p, f"{h:g}"])
-    return f.getvalue()
+    wr = csv.writer(f, delimiter=";" if excel else ",", lineterminator="\r\n" if excel else "\n")
+    wr.writerow(["date", "code", "project", "hours"])
+    for x in report_lines(app, monday_of(d)):
+        h = f"{x['hours']:g}"
+        wr.writerow([x["date"].isoformat(), x["code"], x["what"], h.replace(".", ",") if excel else h])
+    return ("\ufeff" if excel else "") + f.getvalue()
 
 
 # ---- the server ------------------------------------------------------------------------------------------------------
@@ -1259,8 +1424,10 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     return self._send(200, data_page(app, token))
                 if u.path == "/export.csv":
                     d = self._date(q)
-                    return self._send(200, csv_text(app, d), "text/csv; charset=utf-8",
-                                      {"Content-Disposition": f"attachment; filename=timesheet-{monday_of(d)}.csv"})
+                    excel = q.get("format", [""])[0] == "excel"
+                    return self._send(200, csv_text(app, d, excel), "text/csv; charset=utf-8",
+                                      {"Content-Disposition": f"attachment; filename=timesheet-{monday_of(d)}"
+                                                              f"{'-excel' if excel else ''}.csv"})
                 if u.path == "/summary.txt":
                     return self._send(200, report.text(app.summary(self._date(q))), "text/plain; charset=utf-8")
                 if u.path == "/ping":
@@ -1282,7 +1449,7 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                 if path == "/api/answer":
                     if not body.get("project") or body.get("kind") not in KINDS:
                         return self._send(400, "Pick both a project and a kind of work.", "text/plain")
-                    how = body.get("how") if body.get("how") in ("block", "window", "split") else "block"
+                    how = body.get("how") if body.get("how") in ("block", "window", "split", "spot") else "block"
                     app.answer(date.fromisoformat(body["date"]), body["ids"], body["project"], body["kind"], how,
                                asked=bool(body.get("asked")))
                     return self._json({"ok": True, "undo": app.last_undo})
@@ -1301,6 +1468,25 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                             return self._send(400, "Pick a project and a kind of work, or Not work.", "text/plain")
                         app.answer_gap(d, code, body.get("start", ""), body.get("end", ""), body["project"], body["kind"],
                                        bool(body.get("meeting")))
+                    return self._json({"ok": True, "undo": app.last_undo})
+                if path == "/api/codes":
+                    c = app.store.config()
+                    clean = lambda v: " ".join(str(v).split())[:20]
+                    for p, code in (body.get("projects") or {}).items():
+                        if p in c.get("projects", {}) and isinstance(c["projects"][p], dict):
+                            if clean(code):
+                                c["projects"][p]["code"] = clean(code)
+                            else:
+                                c["projects"][p].pop("code", None)
+                    c["absenceCodes"] = {k: clean(v) for k, v in (body.get("absence") or {}).items() if k in OFF and clean(v)}
+                    app.store.save_config(c)
+                    app.reload()
+                    return self._json({"ok": True})
+                if path == "/api/dayoff":
+                    kind = str(body.get("kind") or "")
+                    if kind and kind not in OFF:
+                        return self._send(400, "Pick vacation, sick, sick child or time off.", "text/plain")
+                    app.set_day_off(date.fromisoformat(body["date"]), kind or None)
                     return self._json({"ok": True, "undo": app.last_undo})
                 if path == "/api/more":
                     app.ask_more(date.fromisoformat(body["date"]))
@@ -1335,8 +1521,9 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                         if email and not EMAIL.match(email):
                             return self._send(400, "That does not look like an email address.", "text/plain")
                         c["recordEmail"] = email
-                    if "askAboutGaps" in body:
-                        c["askAboutGaps"] = bool(body["askAboutGaps"])
+                    for k in ("askAboutGaps", "spotChecks", "detectCalls"):
+                        if k in body:
+                            c[k] = bool(body[k])
                     if "role" in body:
                         if body["role"] not in roles.ROLES:
                             return self._send(400, "Unknown role.", "text/plain")

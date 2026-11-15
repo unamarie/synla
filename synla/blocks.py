@@ -1,7 +1,8 @@
 """From raw activity to segments, and from segments to blocks the user can review."""
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+from .context import mask
 from .model import MANUAL_APP, Block, Guess, Segment
 
 MERGE_GAP = timedelta(seconds=60)    # same window again within a minute: same segment
@@ -32,8 +33,10 @@ def looks_like_call(app: str, title: str) -> bool:
     return a in CALL_APPS and bool(t) and not NOT_CALL.search(t)
 
 
-def parse_ts(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone()
+def parse_ts(s: str, tz: int | None = None) -> datetime:
+    """A moment, shown in the time zone it was recorded in (minutes ahead of UTC), or this computer's if unknown."""
+    t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return t.astimezone(timezone(timedelta(minutes=tz))) if tz is not None else t.astimezone()
 
 
 def _intervals(events, want=None):
@@ -41,7 +44,7 @@ def _intervals(events, want=None):
     for e in events:
         if want and e.get("data", {}).get("status") != want:
             continue
-        start = parse_ts(e["timestamp"])
+        start = parse_ts(e["timestamp"], e.get("tz"))
         out.append((start, start + timedelta(seconds=float(e["duration"])), e.get("data", {})))
     return sorted(out, key=lambda x: x[0])
 
@@ -70,7 +73,8 @@ def segments(window_events: list, afk_events: list) -> list:
     idle = _intervals(afk_events, want="afk")
     out: list[Segment] = []
     for start, end, data in _intervals(window_events):
-        app, title = data.get("app", ""), data.get("title", "")
+        app = data.get("app", "")
+        title = mask(app, data.get("title", ""))          # names from ActivityWatch are hidden the same way
         call = bool(data.get("call")) or looks_like_call(app, title)
         holes = [h for h in idle if h[1] - h[0] > CALL_MAX_IDLE] if call else idle
         for s, e in _subtract(start, end, holes):
