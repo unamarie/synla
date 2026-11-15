@@ -26,6 +26,9 @@ employer could use to monitor anyone.
   two "Not work" answers at the same time of day it stops asking about that break.
 - **A reminder at the end of the day.** On Windows, a notification 45 minutes before your workday ends, only when
   there is something to ask and never in the middle of a call. Click it to answer.
+- **Shows what keeps coming back.** When the same failure or cleanup returns, the week says so: "Came back on
+  4 days since 12 Aug, 6.5 h in all". Window names are deleted after 30 days, so Synla keeps counting for 90 days with
+  one-way codes, the same way it stores what it learns.
 - **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
   from it.
 - **Keeps meetings.** In a call you don't touch the keyboard, so other trackers count you as away. Synla knows when
@@ -104,7 +107,8 @@ time. Turn the questions off on the **Your data** page.
   synced to OneDrive.
 - On Windows, window names are encrypted with your Windows login, so other accounts, a copied disk or a backup see
   scrambled bytes.
-- What Synla learns is stored as one-way codes, never as readable file names or email subjects.
+- What Synla learns, and what keeps coming back, is stored as one-way codes, never as readable file names or email
+  subjects.
 - Window names are deleted after 30 days. After that only the project, the kind of work and the time remain, so your
   timesheet stays while the details about colleagues and customers are gone. Answers and the log go after 90 days.
   The record book keeps sealed weeks, with no window names, for 5 years.
@@ -184,7 +188,8 @@ python -m synla demo
 1. **Segments.** Window activity with away time cut out. Calls keep their time, up to two hours without input.
 2. **Clues.** Each window title is split into clues: the exact window, file name, folder, email subject, numbers such
    as 4500-1203 or ECR-2026-0153, words, and signals such as "reads like a question", "sounds urgent" or "in a call".
-   Years, dates, times and versions are not counted as numbers.
+   Years, dates, times and versions are not counted as numbers. In Outlook, Synla tells an email from a meeting invite
+   and the calendar. Reading an invite is not a meeting, and the word "meeting" only counts in Teams, Zoom or Webex.
 3. **Guess.** Each clue votes for a project and a kind of work, from your keywords, a few built-in rules and your
    earlier answers. A clue that always meant the same thing counts fully; a clue seen everywhere, such as "Excel",
    counts for little. The very same window is trusted after one answer.

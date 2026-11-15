@@ -8,7 +8,8 @@ from . import protect, recorder, report, workload
 from .blocks import _subtract, blocks, segments
 from .classify import ASK_BELOW, Classifier
 from .blocks import NOISE
-from .model import KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment
+from .context import source_key
+from .model import INVISIBLE, KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment
 from .record import FORMAT, RecordBook
 from .source import ActivityWatch, Auto, JsonFile, SynlaRecorder, day_range
 from .store import utc_key
@@ -63,7 +64,41 @@ class Synla:
             return hit[1]
         bl = self._read_day(d)
         self._cache[d] = (clock.monotonic(), bl)
+        self._note_repeats(d, bl)
         return bl
+
+    # ---- what keeps coming back ------------------------------------------------------------------------------
+    def repeat_code(self, label: str) -> str:
+        return self.store.hasher()("src:" + source_key(label))[:16]
+
+    def _note_repeats(self, d: date, bl: list):
+        """Unplanned work by source for this day, kept as one-way codes with kind and minutes. Window names are deleted
+        after 30 days, but these codes let Synla see for as long as your answers are kept that the same failure keeps
+        coming back. A code can't be turned back into the name."""
+        if not any(s.title != DELETED and s.app != MANUAL_APP for b in bl for s in b.segments):
+            return                                     # names deleted: keep what was noted while they were there
+        day = {}
+        for b in bl:
+            if b.guess.kind in INVISIBLE and b.main.app != MANUAL_APP and b.main.title != DELETED:
+                c = self.repeat_code(report.label(b))
+                kind, minutes = day.get(c, [b.guess.kind, 0.0])
+                day[c] = [kind, round(minutes + b.minutes, 1)]
+        r = self.store.repeats()
+        if r.get(d.isoformat(), {}) != day:
+            if day:
+                r[d.isoformat()] = day
+            else:
+                r.pop(d.isoformat(), None)
+            self.store.save_repeats(r)
+
+    def comes_back(self, label: str, until: date) -> dict | None:
+        """How often this source of unplanned work came back: days with 5 minutes or more, hours, and since when."""
+        c = self.repeat_code(label)
+        hits = sorted((day, v[c][1]) for day, v in self.store.repeats().items()
+                      if c in v and v[c][1] >= 5 and day <= until.isoformat())
+        if len(hits) < 2:
+            return None
+        return {"days": len(hits), "hours": sum(m for _, m in hits) / 60, "since": date.fromisoformat(hits[0][0])}
 
     def _changed(self):
         self._cache = {}
@@ -146,7 +181,8 @@ class Synla:
                 unsure = self.unsure(b, s)
                 a = agg.setdefault(s.key, {"key": s.key, "app": s.app, "title": s.title, "unsure": 0.0,
                                            "minutes": 0.0, "ids": [], "blocks": set(), "call": False,
-                                           "first": s.start, "last": s.end})
+                                           "first": s.start, "last": s.end, "spans": []})
+                a["spans"].append((s.start, s.end))
                 a["minutes"] += s.minutes
                 a["unsure"] += s.minutes if unsure else 0.0
                 a["ids"].append(s.id)
@@ -572,6 +608,7 @@ class Synla:
             "added": len(self.store.manual()),
             "away": sum(len(v.get("away", [])) for v in self.store.days().values()),
             "pauses": len(self.store.pauses()),
+            "repeats": sum(len(v) for v in self.store.repeats().values()),
             "askAboutGaps": bool(self.config.get("askAboutGaps", True)),
             "clues": sum(len(v) for k, v in mem.items() if k in ("project", "kind")),
             "seals": len(seals),

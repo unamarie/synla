@@ -22,8 +22,13 @@ APP_SUFFIX = re.compile(r"\s+[-|\u2013\u2014]\s+(Microsoft\s+)?(Excel|Word|Power
 FILE = re.compile(r"([\w\-. ()\']{2,80}?)\.(xlsx|xlsm|xls|csv|docx|doc|pptx|pdf|py|ipynb|sql|pbix|pbip|json|md|txt|html|js|ts|tmdl)\b", re.I)
 PATH = re.compile(r"(?:[A-Za-z]:\\|/|~/)[^\s|]+")
 EMAIL_SUBJECT = re.compile(r"^(?:(?:re|fw|fwd|sv|vs)\s*:\s*)+(.+)$", re.I)
-# An email opened in its own window: "RE: Seal kit - Message (HTML)", in Norwegian "Melding (HTML)"
-MESSAGE_SUFFIX = re.compile(r"\s+[-\u2013]\s+(Message|Melding)\s+\((HTML|Plain Text|Rich Text|ren tekst|rik tekst)\)$", re.I)
+# Outlook items opened in their own window: an email "RE: Seal kit - Message (HTML)", an invite "Weekly status - Meeting",
+# in Norwegian "Melding (HTML)", "Møte", "Avtale"
+OUTLOOK_ITEM = re.compile(r"\s+[-\u2013]\s+(?P<what>Message|Melding|Meeting Series|Meeting|Møteserie|Møte|Appointment|Avtale)"
+                          r"(\s+\((HTML|Plain Text|Rich Text|ren tekst|rik tekst)\))?$", re.I)
+OUTLOOK_APPS = ("outlook", "olk")
+MEETING_APPS = ("ms-teams", "teams", "zoom", "webex", "ciscocollabhost", "cpthost", "slack")
+ALERT_TAGS = {"urgent", "haster", "viktig", "important", "alert", "warning", "varsel", "fw", "fwd", "re", "sv", "vs"}
 EMAIL_ADDRESS = re.compile(r"\S+@\S+")
 TOKEN = re.compile(r"[0-9A-Za-zÆØÅæøå][0-9A-Za-zÆØÅæøå\-./_]*")
 NOT_ID = re.compile(r"(19|20)\d\d|\d{4}-\d\d?-\d\d?|\d\d?[./]\d\d?([./]\d{2,4})?|\d+[.,]\d{1,2}|(v|rev|ver)\.?\d+(\.\d+)*")
@@ -39,8 +44,38 @@ def norm(s: str) -> str:
 def strip_app(title: str) -> str:
     t = title
     for _ in range(2):            # "Chat | Sales team | Microsoft Teams" has two suffixes
-        t = MESSAGE_SUFFIX.sub("", APP_SUFFIX.sub("", t))
+        t = OUTLOOK_ITEM.sub("", APP_SUFFIX.sub("", t))
     return t.strip()
+
+
+def outlook_item(app: str, title: str) -> str | None:
+    """What an Outlook window shows: an email, a meeting invite, the calendar or the inbox."""
+    a = norm(app or "").removesuffix(".exe")
+    if a not in OUTLOOK_APPS:
+        return None
+    t = APP_SUFFIX.sub("", (title or "").strip())
+    m = OUTLOOK_ITEM.search(t)
+    if m:
+        return "email" if m.group("what").lower() in ("message", "melding") else "invite"
+    low = t.lower()
+    if low.startswith(("calendar", "kalender")):
+        return "calendar"
+    if low.startswith(("inbox", "innboks", "mail ", "mail-", "e-post")) or low in ("mail", "outlook"):
+        return "inbox"
+    return "email" if EMAIL_SUBJECT.match(t) else None
+
+
+def source_key(text: str) -> str:
+    """The same source of unplanned work, however it is written: "RE: Invoice export failed 2026-12-01" and
+    "URGENT: Invoice export failed" both become "invoice export failed" (with "urgent" kept if it is there)."""
+    t = strip_app(text or "")
+    m = EMAIL_SUBJECT.match(t)
+    t = (m.group(1) if m else t).lower()
+    t = re.sub(r"\[(number|email)\]|\d+", " ", t)
+    words = re.sub(r"[^\wæøå]+", " ", t).replace("_", " ").split()
+    while words and words[0] in ALERT_TAGS:       # "URGENT:", "[ALERT]", "Haster:" say how, not what
+        words.pop(0)
+    return " ".join(words)[:80]
 
 
 def numbers(t: str) -> list:
@@ -90,16 +125,21 @@ def _features(app: str, title: str, call: bool) -> list:
         if len(bits) >= 2:
             out.append(f"folder:{norm(bits[-1])}")
 
+    item = outlook_item(app, title or "")
     m = EMAIL_SUBJECT.match(t)
     if m:
         out.append(f"subject:{norm(m.group(1))[:60]}")
         out.append("is:reply")
+    elif item == "email":                      # a new email opened in its own window: the title is the subject
+        out.append(f"subject:{norm(t)[:60]}")
+    if item == "invite":                       # reading or answering an invite is not the meeting itself
+        out.append("is:invite")
 
     # Teams/Slack: "Chat | Sales team" or "Sales team (Chat)"
     if re.search(r"\bchat\b", t, re.I):
         out.append("is:chat")
-    if re.search(r"\b(meeting|call|møte|standup|stand-up|review)\b", t, re.I):
-        out.append("is:meeting")
+    if a in MEETING_APPS and re.search(r"\b(meeting|call|møte|standup|stand-up|review)\b", t, re.I):
+        out.append("is:meeting")              # a meeting window in Teams or Zoom; the word alone in an email is not
     if re.search(r"\b(urgent|asap|haster|error|failed|feil|down|incident|broken)\b", t, re.I):
         out.append("is:urgent")
     if re.search(r"\?\s*$|\b(where is|any update|status on|waiting for|reminder|purring|påminnelse)\b", t, re.I):

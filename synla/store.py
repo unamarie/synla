@@ -152,6 +152,14 @@ class Store:
         d[day.isoformat()] = state
         self.save_days(d)
 
+    # repeats.json: per day, unplanned work by source as one-way codes with kind and minutes, so Synla can tell that
+    # the same failure keeps coming back after the window names are deleted
+    def repeats(self) -> dict:
+        return self._read("repeats.json", {})
+
+    def save_repeats(self, r: dict):
+        self._write("repeats.json", r)
+
     # reminded.json: the last day the end-of-day reminder was shown (written by the recorder only)
     def reminded(self) -> str | None:
         return self._read("reminded.json", {}).get("day")
@@ -220,6 +228,10 @@ class Store:
         keep_days_state = {k: v for k, v in days.items() if k >= cutoff.date().isoformat()}
         if len(keep_days_state) != len(days):
             self.save_days(keep_days_state)
+        r = self.repeats()
+        keep_repeats = {k: v for k, v in r.items() if k >= cutoff.date().isoformat()}
+        if len(keep_repeats) != len(r):
+            self.save_repeats(keep_repeats)
         p = self._read("pause.json", {})
         history = [h for h in p.get("history", []) if datetime.fromisoformat(h[1]) >= cutoff]
         if len(history) != len(p.get("history", [])):
@@ -234,7 +246,7 @@ class Store:
     def delete_everything(self, record_book: bool = False):
         """Removes Synla's data. The record book only when asked. Your settings (config.json) stay."""
         names = ["decisions.json", "corrections.jsonl", "memory.json", "key.bin", "pause.json", "manual.json",
-                 "days.json", "reminded.json", "since.json", "activity.db", "activity.db-wal", "activity.db-shm"]
+                 "days.json", "reminded.json", "since.json", "repeats.json", "activity.db", "activity.db-wal", "activity.db-shm"]
         if record_book:
             names += ["record.db", "record.db-wal", "record.db-shm"]
         for name in names:

@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import record, recorder, report, workload
 from .classify import ASK_BELOW
-from .context import strip_app
+from .context import outlook_item, strip_app
 from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN
 
 # Kinds of work as the pages say them, in the order of the buttons (keys q to u)
@@ -89,7 +89,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .dot.green{background:var(--green)}.dot.yellow{background:var(--amber)}.dot.red{background:var(--red)}.dot.big{width:16px;height:16px;margin-top:4px}
 .timeline{margin:6px 0 4px}.track{position:relative;height:30px;background:var(--track);border-radius:8px;overflow:hidden}
 .seg{position:absolute;top:0;bottom:0}
-.seg.asked{background:color-mix(in srgb,var(--sun) 10%,transparent);outline:2px dashed var(--sun);outline-offset:-2px;border-radius:6px}
+.seg.asked{background:color-mix(in srgb,var(--sun) 12%,transparent);outline:2px dashed var(--ink);outline-offset:-2px;border-radius:4px}
 .uns{background:repeating-linear-gradient(45deg,var(--sun) 0 4px,var(--hatch) 4px 8px)!important}
 .ticks{position:relative;height:18px;font-size:.72rem;color:var(--muted)}.tick{position:absolute;transform:translateX(-50%);top:3px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.9rem;margin:6px 0 26px;color:var(--muted)}
@@ -114,7 +114,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip .sw{width:10px;height:10px;border-radius:50%}
 .newp input{font:inherit;font-size:.95rem;border:1.5px solid var(--sea);border-radius:999px;padding:6px 14px;background:var(--surface);color:var(--ink);width:200px}
 .key{font-size:.72rem;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;background:var(--paper);min-width:18px;text-align:center}
-.key.light{background:transparent;border-color:#ffffff66;color:#ffffffcc}
+.key.light{background:transparent;border-color:color-mix(in srgb,var(--paper) 45%,transparent);color:color-mix(in srgb,var(--paper) 85%,transparent)}
 .hint{font-size:.85rem;color:var(--muted);margin:8px 0 0 132px}
 .act{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:20px}
 .skip{background:none;border:0;color:var(--muted);cursor:pointer;padding:8px 14px;display:flex;gap:8px;align-items:center}
@@ -159,6 +159,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .pv{text-align:right;font-weight:700}
 .inv{list-style:none;margin:0;padding:0;font-size:.92rem}.inv li{display:grid;grid-template-columns:96px minmax(0,1fr) auto;gap:8px;padding:7px 0;border-top:1px solid var(--line)}
 .inv li:first-child{border-top:0}.inv i{font-style:normal;color:var(--muted)}.inv span{overflow-wrap:anywhere}.inv b{white-space:nowrap}
+.inv small{display:block;color:var(--muted);font-size:.8rem;margin-top:2px}
 .sealed{display:flex;align-items:center;gap:14px}.sealed > div{flex:1;min-width:0}
 .fp{font-family:ui-monospace,Consolas,monospace;font-size:.8rem;color:var(--muted);overflow-wrap:anywhere}
 .mini{font-size:.85rem;margin-top:2px}
@@ -337,6 +338,35 @@ def app_name(app: str) -> str:
     return app if app == MANUAL_APP else APPS.get((app or "").lower(), re.sub(r"\.exe$", "", app or "", flags=re.I))
 
 
+OUTLOOK_SAYS = {"email": "Email in Outlook", "invite": "Meeting invite in Outlook", "calendar": "Calendar in Outlook",
+                "inbox": "Inbox in Outlook"}
+
+
+def where(app: str, title: str) -> str:
+    """The app, or what an Outlook window shows: an email, an invite, the calendar."""
+    return OUTLOOK_SAYS.get(outlook_item(app, title), app_name(app))
+
+
+def stretches(spans: list) -> list:
+    """Stretches of the same window in a row, joined when less than 2 minutes apart."""
+    out = []
+    for a, b in sorted(spans):
+        if out and (a - out[-1][1]).total_seconds() < 120:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def when_text(spans: list) -> str:
+    """'33 min at 13:34 and 23 min at 21:00', or 'in 7 stretches between 08:12 and 16:40'."""
+    st = stretches(spans)
+    if len(st) > 3:
+        return f"{hm(sum((b - a).total_seconds() for a, b in st) / 60)} in {len(st)} stretches between {st[0][0]:%H:%M} and {st[-1][1]:%H:%M}"
+    parts = [f"{hm((b - a).total_seconds() / 60)} at {a:%H:%M}" for a, b in st]
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
 def shown(title: str, app: str) -> str:
     return strip_app(title or "") or app_name(app)
 
@@ -453,7 +483,7 @@ def page(app, title: str, body: str, token: str, here: str = "") -> str:
 
 
 # ---- today -----------------------------------------------------------------------------------------------------------
-def timeline(app, d: date, bl: list, asked: tuple | None = None) -> str:
+def timeline(app, d: date, bl: list, asked: list | None = None) -> str:
     ws, we = app.workday
     start_h, end_h = int(ws[:2]), int(we[:2]) + (1 if we[3:5] != "00" else 0)
     segs = [s for b in bl for s in b.segments]
@@ -472,9 +502,9 @@ def timeline(app, d: date, bl: list, asked: tuple | None = None) -> str:
             w = min(100 - x, max(0.3, s.minutes * 60 / span * 100))
             tip = f"{s.start:%H:%M} to {s.end:%H:%M} · {shown(s.title, s.app)} · {'not sorted yet' if cls != 'seg' else project_of(b)}"
             bars.append(f"<span class='{cls}' style='left:{x:.2f}%;width:{w:.2f}%;background:{c}' title='{escape(tip, quote=True)}'></span>")
-    if asked:                                  # the time away Synla is asking about right now
-        x = max(0.0, (asked[0] - t0).total_seconds() / span * 100)
-        w = min(100 - x, (asked[1] - asked[0]).total_seconds() / span * 100)
+    for a, b in asked or []:                   # what Synla is asking about right now: time away, or a window's stretches
+        x = max(0.0, (a - t0).total_seconds() / span * 100)
+        w = min(100 - x, max(0.6, (b - a).total_seconds() / span * 100))
         bars.append(f"<span class='seg asked' style='left:{x:.2f}%;width:{w:.2f}%' title='Asked about below'></span>")
     every = 1 if h1 - h0 <= 14 else 2
     ticks = "".join(f"<span class='tick' style='left:{(h - h0) / (h1 - h0) * 100:.2f}%'>{h:02d}</span>"
@@ -496,7 +526,7 @@ def ask_card(app, d: date, q: dict) -> str:
     g = it["guess"]
     n = len(q["items"])
     known = g.project if g.project in app.projects else ""
-    meta = [app_name(it["app"]), f"{hm(it['minutes'])} today", f"{it['first']:%H:%M} to {it['last']:%H:%M}"]
+    meta = [where(it["app"], it["title"]), when_text(it["spans"])]
     if it["call"]:
         meta.append("in a call")
     hint = (f"Synla thinks {escape(known)}{why(g)}." if known
@@ -579,7 +609,7 @@ def check_section(app, d: date, bl: list) -> str:
             f"<div class='crow' data-ids='{ids_attr(s.id for s in b.segments)}' data-project='{escape(p, quote=True)}' "
             f"data-kind='{escape(b.guess.kind)}' data-windows='{data}'>"
             f"<span class='t'>{b.start:%H:%M} to {b.end:%H:%M}</span>"
-            f"<span class='w'><b>{escape(shown(b.main.title, b.main.app))}</b><small>{escape(app_name(b.main.app))}{more} · "
+            f"<span class='w'><b>{escape(shown(b.main.title, b.main.app))}</b><small>{escape(where(b.main.app, b.main.title))}{more} · "
             f"{hm(b.minutes)}</small></span>"
             f"<span class='pj'><i class='sw {'uns' if who == 'unsure' else ''}' style='background:{color(app, p)}'></i>"
             f"<span>{escape(p)}<small>{SAY.get(b.guess.kind, '')}</small></span></span>"
@@ -628,7 +658,9 @@ def today_page(app, d: date, token: str) -> str:
         check = f"<button class='link' data-toggle='check'>{label}</button>"
     quiet = f"<div class='quiet'>{check or '<span></span>'}<button class='link' data-toggle='away'>+ Time away from the computer</button></div>"
     first = q["items"][0] if q["items"] else None
-    asked = (first["start"], first["end"]) if first and first["type"] == "gap" else None
+    asked = None
+    if first:
+        asked = [(first["start"], first["end"])] if first["type"] == "gap" else [tuple(x) for x in stretches(first["spans"])]
     body = (head + (timeline(app, d, bl, asked) if bl else "") + card + quiet + (check_section(app, d, bl) if bl else "")
             + away_section(app, d))
     return page(app, "Today" if d == app.today() else day_title(d), body, token, "today" if d == app.today() else "")
@@ -662,8 +694,9 @@ def week_view(app, monday: date) -> dict | None:
             v["days"][d] = {"hours": sum(per.values()), "projects": per, "early": before >= 15, "late": after >= 15}
             for p, h in per.items():
                 v["projects"][p] = v["projects"].get(p, 0.0) + h
+        sunday = monday + timedelta(days=6)
         v.update(hours=s["hours"], share=s["invisible_share"], unplanned=s["invisible_hours"], assessed=assessed,
-                 top=[(r["kind"], r["what"], r["hours"]) for r in s["top_invisible"]])
+                 top=[(r["kind"], r["what"], r["hours"], app.comes_back(r["what"], sunday)) for r in s["top_invisible"]])
         return v
     seal = status["seal"]
     if not seal:
@@ -685,8 +718,14 @@ def week_view(app, monday: date) -> dict | None:
     total = st["totalHours"]
     v.update(hours=total, unplanned=sum(inv.values()), share=sum(inv.values()) / total if total else 0.0, live=False,
              assessed=workload.assess(st.get("workload", {}), app.config),
-             top=[(k, SAY[k], h) for k, h in sorted(inv.items(), key=lambda kv: -kv[1])])
+             top=[(k, SAY[k], h, None) for k, h in sorted(inv.items(), key=lambda kv: -kv[1])])
     return v
+
+
+def unplanned_row(kind: str, what: str, hours: float, back: dict | None) -> str:
+    again = (f"<small>Came back on {back['days']} days since {back['since'].day} {back['since']:%b}, "
+             f"{back['hours']:.1f} h in all</small>" if back else "")
+    return f"<li><i>{SHORT.get(kind, kind)}</i><span>{escape(what)}{again}</span><b>{hours:.1f} h</b></li>"
 
 
 def record_panel(app, monday: date, status: dict) -> str:
@@ -757,7 +796,7 @@ def week_page(app, d: date, token: str) -> str:
     prow = "".join(f"<div class='pr'><span>{escape(p)}</span><span class='pb'><span class='{'uns' if p == NOT_SORTED else ''}' "
                    f"style='width:{h / pmax * 100:.0f}%;background:{color(app, p)}'></span></span><span class='pv'>{h:.1f} h</span></div>"
                    for p, h in sorted(v["projects"].items(), key=lambda kv: (kv[0] == NOT_SORTED, -kv[1])))
-    inv = "".join(f"<li><i>{SHORT.get(k, k)}</i><span>{escape(w)}</span><b>{h:.1f} h</b></li>" for k, w, h in v["top"][:3])
+    inv = "".join(unplanned_row(k, w, h, r) for k, w, h, r in v["top"][:3])
     more = (f"<p class='note'><a href='/week/indicators?date={monday}#unplanned'>All of it ›</a></p>" if len(v["top"]) > 3 else "")
     deleted = ("" if v["live"] else "<p class='note'>The details for this week have been deleted. This is the week as sealed "
                "in your record book.</p>")
@@ -832,7 +871,7 @@ def indicators_page(app, d: date, token: str) -> str:
     tiles = "".join(f"<a class='tile' href='/week?date={r['monday']}'>week {r['monday'].isocalendar()[1]}"
                     f"<b><span class='dot {r['level']}'></span> {r['hours']:.0f} h</b>{r['unplanned']:.0%} unplanned</a>"
                     for r in app.trend(monday))
-    inv = "".join(f"<li><i>{SHORT.get(k, k)}</i><span>{escape(w)}</span><b>{h:.1f} h</b></li>" for k, w, h in v["top"])
+    inv = "".join(unplanned_row(k, w, h, r) for k, w, h, r in v["top"])
     body = f"""<h1>Workload</h1><p class='sub'>{week_title(monday)} · <a href='/week?date={monday}'>back to the week</a></p>
 <div class='verdict {a['level']}'><span class='dot {a['level']} big'></span><div><b>{a['level'].capitalize()} week.</b>
 {escape(workload.sentence(a))}</div></div>
@@ -978,6 +1017,7 @@ why.</p><div class='buttons'><button class='btn' data-gaps='{0 if i['askAboutGap
 <tr><td>Time you added away from the computer (no notes)</td><td class='num'>{i['added']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Answers about time away: when, and whether it was work. Never why</td><td class='num'>{i['away']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Pauses: when each started and ended, so Synla never asks about them</td><td class='num'>{i['pauses']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
+<tr><td>Unplanned work by source, as one-way codes, to see what keeps coming back</td><td class='num'>{i['repeats']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Answer log: what you answered and what Synla had guessed</td><td class='num'>{i['log_entries']:,}</td><td></td><td>{i['keepDays']} days</td></tr>
 <tr><td>Learned clues, stored as one-way codes, not readable names</td><td class='num'>{i['clues']:,}</td><td></td><td>until you delete them</td></tr>
 <tr><td>Record book: sealed weeks with times, projects and kinds, no window names</td><td class='num'>{i['seals']:,}</td><td class='nw'>{_when(datetime.fromisoformat(i['seals_first'])) if i['seals_first'] else 'nothing yet'}</td><td>{i['keepRecordYears']:g} years</td></tr></table>
