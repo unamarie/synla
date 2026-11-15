@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 import sys
 import threading
 import urllib.error
@@ -30,7 +31,7 @@ TRUTH = {
     "supplier certificates": ("Supplier audit", "chasing"), "Invoice export failed": ("Data platform", "firefighting"),
     "Integration error log": ("Data platform", "firefighting"), "Customer list FINAL": ("Internal", "datafixing"),
     "Product codes cleanup": ("Internal", "datafixing"), "Inbox - Outlook": ("Internal", "admin"),
-    "Weekly status meeting": ("Internal", "meeting"), "standup": ("Data platform", "meeting"),
+    "Weekly status meeting": ("Internal", "project"), "standup": ("Data platform", "project"),
     "Timesheet - Intranet": ("Internal", "admin"),
 }
 
@@ -51,11 +52,11 @@ def app(tmp_path):
     return Synla(store)
 
 
-GAP_TRUTH = ("Supplier audit", "meeting")        # the made-up week's meeting in a room, Thursday afternoon
+GAP_TRUTH = ("Supplier audit", "project")        # the made-up week's meeting in a room, Thursday afternoon
 
 
-def answer_gap(app, d, g, project="Supplier audit", kind="meeting"):
-    return app.answer_gap(d, g["code"], f"{g['start']:%H:%M}", f"{g['end']:%H:%M}", project, kind)
+def answer_gap(app, d, g, project="Supplier audit", kind="project", meeting=True):
+    return app.answer_gap(d, g["code"], f"{g['start']:%H:%M}", f"{g['end']:%H:%M}", project, kind, meeting)
 
 
 def answer_all(app, d):
@@ -569,14 +570,16 @@ def test_one_answer_is_enough_for_the_same_window(app):
     assert not any(it["title"] == "Inbox - Outlook" for it in app.questions(tuesday)["items"])
 
 
-def test_one_meeting_does_not_make_every_window_a_meeting(app):
+def test_a_call_is_a_meeting_but_never_the_kind_of_work(app):
     d = MONDAY.date()
     standup = next(w for w in app.unsorted_windows(app.day(d), 50) if "standup" in w["title"])
-    app.answer(d, standup["ids"], "Data platform", "meeting", how="window")
+    app.answer(d, standup["ids"], "Data platform", "project", how="window")
     g = app.classifier.guess("Code.exe", "quality-gate.py - data-platform - Visual Studio Code")
     assert (g.project, g.kind) == ("Data platform", "project") and g.confidence >= 0.7
     other = app.classifier.guess("ms-teams.exe", "Weekly status meeting | Microsoft Teams", True)
-    assert other.kind == "meeting" and other.confidence < 0.7      # another meeting: Synla asks which project
+    assert other.kind != "meeting" and other.confidence < 0.7      # another call: Synla asks what it was for
+    app.classifier.learn("ms-teams.exe", "Old call | Microsoft Teams", "Internal", "meeting", call=True)
+    assert app.classifier.guess("ms-teams.exe", "Old call | Microsoft Teams", True).kind != "meeting"
 
 
 def test_the_daily_limit_and_asking_for_more(app):
@@ -712,7 +715,8 @@ def test_a_meeting_in_a_room_becomes_a_question(app):
     start = answer_gap(app, thursday, gap, *GAP_TRUTH)
     assert not app.gaps(thursday)
     added = next(b for b in app.day(thursday) if b.main.app == MANUAL_APP)
-    assert (added.guess.project, added.guess.kind, added.confirmed) == ("Supplier audit", "meeting", True)
+    assert (added.guess.project, added.guess.kind, added.confirmed) == ("Supplier audit", "project", True)
+    assert added.segments[0].call                           # noted as a meeting: the time only, never what was said
     assert any(x["by"] == "added" for day in app.statement(MONDAY.date())["days"] for x in day["stretches"])
     app.undo(app.last_undo)
     assert not any(b.main.app == MANUAL_APP for b in app.day(thursday)) and app.gaps(thursday)
@@ -723,7 +727,7 @@ def test_a_shorter_answer_does_not_ask_again_about_the_rest(app):
     thursday = (MONDAY + timedelta(days=3)).date()
     gap = app.gaps(thursday)[0]
     end = (gap["start"] + timedelta(minutes=30)).strftime("%H:%M")
-    app.answer_gap(thursday, gap["code"], f"{gap['start']:%H:%M}", end, "Supplier audit", "meeting")
+    app.answer_gap(thursday, gap["code"], f"{gap['start']:%H:%M}", end, "Supplier audit", "project")
     assert not app.gaps(thursday)
 
 
@@ -767,16 +771,24 @@ def test_no_questions_about_time_away_when_turned_off_or_before_this_version(tmp
 def test_time_away_over_http(app, server):
     base, _ = server
     thursday = (MONDAY + timedelta(days=3)).date()
-    first = app.questions(thursday)["items"][0]                     # a bigger window comes first
-    assert first["type"] == "window" and post(f"{base}/api/skip", {"date": str(thursday), "code": first["code"]}, OK) == 200
-    assert "Away from the computer" in LOCAL.open(f"{base}/day?date={thursday}").read().decode()
+    for it in app.questions(thursday)["items"]:                      # bigger windows may come first
+        if it["type"] == "gap":
+            break
+        assert post(f"{base}/api/skip", {"date": str(thursday), "code": it["code"]}, OK) == 200
+    html = LOCAL.open(f"{base}/day?date={thursday}").read().decode()
+    assert "Away from the computer" in html and "It was a meeting" in html
     gap = app.gaps(thursday)[0]
     status, reply = post_json(f"{base}/api/gap", {"date": str(thursday), "code": gap["code"], "notWork": True}, OK)
     assert status == 200 and reply["undo"] and not app.gaps(thursday)
     assert post(f"{base}/api/undo", {"token": reply["undo"]}, OK) == 200
-    body = {"date": str(thursday), "code": gap["code"], "project": "Supplier audit", "kind": "meeting",
+    body = {"date": str(thursday), "code": gap["code"], "project": "Supplier audit", "kind": "project", "meeting": True,
             "start": f"{gap['start']:%H:%M}", "end": f"{gap['end']:%H:%M}"}
     assert post(f"{base}/api/gap", body, OK) == 200 and not app.gaps(thursday)
+    assert [e.get("meeting") for e in app.store.manual()] == [True]
+    body = {"date": str(thursday), "start": "18:00", "end": "18:30", "project": "Supplier audit", "kind": "travel"}
+    assert post(f"{base}/api/time", body, OK) == 200
+    assert [e.get("meeting") for e in app.store.manual()] == [True, None]        # travel home is not a meeting
+    assert " · meeting" in LOCAL.open(f"{base}/day?date={thursday}").read().decode()
     assert post(f"{base}/api/settings", {"askAboutGaps": False}, OK) == 200 and app.config["askAboutGaps"] is False
 
 
@@ -851,7 +863,8 @@ def test_each_role_gets_its_own_words_and_choices(app):
         app.config["role"] = key
         shown, more = app.kind_choices()
         assert roles.word(app.config) == word and roles.say(app.config, "project") == planned
-        assert shown == list(roles.ROLES[key]["kinds"]) and len(shown) <= 8 and set(shown) | set(more) == set(KINDS)
+        assert shown == list(roles.ROLES[key]["kinds"]) and len(shown) <= 8
+        assert set(shown) | set(more) == set(KINDS) - {"meeting"}           # a meeting is a format, never a kind
     assert "travel" in app.kind_choices()[1] and "people" in roles.ROLES["leader"]["kinds"]
     app.config["role"] = "leader"
     assert "datafixing" not in app.kind_choices()[0] and "datafixing" in app.kind_choices("datafixing")[0]
@@ -881,7 +894,7 @@ def test_kinds_you_never_use_fold_away_after_four_weeks(app):
                                                    "project": "Internal", "kind": "project", "how": "block"}})
     shown, more = app.kind_choices()
     assert shown == ["project", "helping", "firefighting", "chasing", "datafixing"]   # unplanned kinds always stay
-    assert {"meeting", "admin"} <= set(more) and "meeting" in app.kind_choices("meeting")[0]
+    assert "admin" in more and "meeting" not in set(more) | set(app.kind_choices("meeting")[0])
 
 
 def test_roles_over_http(app, server):
@@ -893,3 +906,100 @@ def test_roles_over_http(app, server):
     page = LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
     assert "<span class='lab'>Customer</span>" in page and "Customer work" in page and "CRM and admin" in page
     assert "Which fits your work best?" not in page
+
+
+# ---- meetings are noted, urgent work pushes planned work, Dynamics 365 -----------------------------------------------
+def test_dynamics_365_tabs_say_what_they_are():
+    from synla.context import d365, strip_app
+    from synla.server import where
+    ce = "Account: Havbruk Vest AS - Dynamics 365 - Microsoft Edge"
+    fo = "Sales order: 000123 -- Finance and Operations - Microsoft Edge"
+    assert d365(ce) == ("ce", "Account", "Havbruk Vest AS") and where("msedge.exe", ce) == "Account in Dynamics 365"
+    assert d365(fo) == ("fo", "Sales order", "000123") and where("msedge.exe", fo) == "Sales order in Finance and Operations"
+    assert d365("All customers - Dynamics 365 Finance - Microsoft Edge") == ("fo", "", "All customers")
+    assert d365("Opportunity: New pumps | Sales Hub - Microsoft Edge")[:2] == ("ce", "Opportunity")
+    assert d365("Help - Customer Service - Microsoft Edge") is None and d365("Budget 2027.xlsx - Excel") is None
+    assert strip_app(ce) == "Account: Havbruk Vest AS"
+    f = features("msedge.exe", "Case: URGENT pump stopped - Dynamics 365 - Microsoft Edge")
+    assert {"rec:case", "record:urgent pump stopped", "is:urgent"} <= set(f)
+
+
+def test_the_record_type_teaches_the_kind_and_the_record_the_customer(app):
+    c = app.classifier
+    for name in ("Pump stopped", "Valve leak"):
+        c.learn("msedge.exe", f"Case: {name} - Dynamics 365 - Microsoft Edge", "Havbruk Vest", "firefighting")
+    g = c.guess("msedge.exe", "Case: Alarm on site - Dynamics 365 - Microsoft Edge")
+    assert g.kind == "firefighting"                                 # a case, like the last ones
+    c.learn("msedge.exe", "Account: Fjordlaks AS - Dynamics 365 - Microsoft Edge", "Fjordlaks", "project")
+    assert c.guess("msedge.exe", "Account: Fjordlaks AS | Sales Hub - Microsoft Edge").project == "Fjordlaks"
+
+
+def test_a_meeting_is_asked_by_what_it_was_for(app, server):
+    base, _ = server
+    thursday = (MONDAY + timedelta(days=3)).date()
+    call = next(it for it in app.questions(thursday)["items"] if "Invoice export failed |" in it.get("title", ""))
+    assert call["call"] and call["guess"].kind == "firefighting"    # an escalation call is urgent work
+    for it in app.questions(thursday)["items"]:
+        if it is call or it["code"] == call["code"]:
+            break
+        app.skip(thursday, it["code"])
+    html = LOCAL.open(f"{base}/day?date={thursday}").read().decode()
+    assert "What was this meeting for?" in html and "Invoice export failed" in html
+    assert "meeting" not in [k for k in app.kind_choices()[0] + app.kind_choices()[1]]
+    app.answer(thursday, call["ids"], "Data platform", "firefighting", how="window", asked=True)
+    other = app.classifier.guess("ms-teams.exe", "Weekly status meeting | Microsoft Teams", True)
+    assert other.kind != "firefighting"                             # one escalation call does not make every call one
+
+
+def test_meetings_count_by_the_clock_and_unplanned_ones_count_as_unplanned(app):
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    s = app.summary(MONDAY.date())
+    days = app.week(MONDAY.date())
+    calls = sum(x.minutes for bl in days.values() for b in bl for x in b.segments if x.call) / 60
+    assert abs(s["meeting_hours"] - calls) < 0.01 and s["meeting_hours"] > 2      # calls and the meeting in a room
+    thursday = days[(MONDAY + timedelta(days=3)).date()]
+    escalation = next(b for b in thursday if "Invoice export failed |" in b.main.title)
+    assert escalation.guess.kind == "firefighting"                  # it counts as unplanned work, not as a meeting
+    assert "meeting" not in s["by_kind"]
+
+
+def test_focus_time_leaves_out_meetings():
+    from synla.model import Block, Guess, Segment
+    t = MONDAY.replace(hour=9)
+    talk = Segment(t, t + timedelta(minutes=90), "ms-teams.exe", "Data platform review | Microsoft Teams", True)
+    code = Segment(t + timedelta(hours=2), t + timedelta(hours=3), "Code.exe", "quality-gate.py - Visual Studio Code")
+    blocks = [Block("a", [talk], Guess("Data platform", "project", 1.0), True),
+              Block("b", [code], Guess("Data platform", "project", 1.0), True)]
+    s = report.summary({MONDAY.date(): blocks})
+    assert s["focus_blocks"] == 1 and abs(s["focus_hours"] - 1) < 0.01 and abs(s["meeting_hours"] - 1.5) < 0.01
+
+
+def test_urgent_work_pushes_planned_work(app, server):
+    base, _ = server
+    for i in range(5):
+        answer_all(app, (MONDAY + timedelta(days=i)).date())
+    s = app.summary(MONDAY.date())
+    assert s["urgent_hours"] == s["by_kind"]["firefighting"] and 0 < s["pushed_hours"] < s["urgent_hours"]
+    assert "pushed" in report.text(s)
+    html = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    assert "Firefighting pushed" in html and "ran into the evening" in html
+    app.config["kindNames"] = {"firefighting": "Error handling"}
+    assert "Error handling pushed" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    live = server_week(app)
+    app.seal(MONDAY.date())
+    Path(app.config["source"]).write_text(json.dumps({"window": [], "afk": []}))      # the details are gone
+    app.store.save_manual([])
+    app.store.save_decisions({})
+    app.reload()
+    sealed = server_week(app)
+    assert not sealed["live"] and set(sealed["days"]) == set(live["days"])
+    for d, x in live["days"].items():
+        assert abs(sealed["days"][d]["urgent"] - x["urgent"]) < 0.05
+        assert abs(sealed["days"][d]["pushed"] - x["pushed"]) < 0.25
+    assert "Firefighting pushed" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+
+
+def server_week(app):
+    from synla.server import week_view
+    return week_view(app, MONDAY.date())

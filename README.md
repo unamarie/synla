@@ -18,8 +18,9 @@ employer could use to monitor anyone.
   and item, order or change numbers, not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
   with its best guess already picked. Press a number for the project, a letter for the kind of work, Enter to save.
 - **A few questions, fewer every day.** Only windows of 5 minutes or more, at most five a day. Smaller things keep
-  Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2, 2 and 1 on Friday: eleven answers
-  for 41.1 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same window.
+  Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2 and 3, and none on Friday: eleven
+  answers for 40.4 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same
+  window.
 - **Asks about time away from the computer.** A meeting in a room, a customer visit, a call on your mobile: when you
   were away for 30 minutes or more, starting and ending inside your workday, Synla asks what it was. "Not work" is
   enough, and Synla never asks why. It never asks about mornings, evenings, weekends, lunch or paused time, and after
@@ -34,13 +35,19 @@ employer could use to monitor anyone.
   rest. After four weeks, kinds of work you never use move under More. The order stays put, so the keys do too.
 - **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
   from it.
-- **Keeps meetings.** In a call you don't touch the keyboard, so other trackers count you as away. Synla knows when
-  you are in a call and keeps that time.
+- **Notes meetings, never records them.** In a call you don't touch the keyboard, so other trackers count you as
+  away. Synla keeps that time and notes that it was a meeting, never what was said. Then it asks what the meeting was
+  for: a status meeting is planned work, an escalation call is urgent work.
+- **Reads Dynamics 365 tabs.** An account, a case or a sales order in Customer Engagement or Finance and Operations:
+  Synla reads the record from the browser tab title, and learns which customer it belongs to and what kind of work
+  that type of record usually is. Only the title, never the screen or the data.
 - **Makes unplanned work visible.** The weekly summary shows how much time went to helping, firefighting, chasing and
-  fixing data, where it came from, and how much happened outside working hours.
+  fixing data, where it came from, and how much happened outside working hours. Urgent work always pushes planned
+  work, so the week says how much: "Firefighting pushed 1.0 h of planned work on Monday and Thursday. Both days ran
+  into the evening."
 - **Produces the timesheet.** Hours per project and day, rounded to 15 minutes, exported as CSV.
-- **Counts time away from the computer.** Add a site visit, a meeting in person or a phone call: from, to, project and
-  kind of work. No notes are stored.
+- **Counts time away from the computer.** Add a site visit, a meeting in person or a phone call: from, to, project,
+  kind of work and whether it was a meeting. No notes are stored.
 - **Watches your workload before it gets too much.** Seven leading indicators (unplanned work, focus time, switches,
   hours outside the working day, days without a break, long days, meetings), each green, yellow or red. The week page
   sums them up in one line, such as "Yellow week. Two long days and little time for focused work."
@@ -48,6 +55,8 @@ employer could use to monitor anyone.
   long after the details are gone. See below.
 
 ![Time away from the computer](docs/away.png)
+
+![A meeting, asked by what it was for](docs/meeting.png)
 
 ![Week](docs/week.png)
 
@@ -96,7 +105,10 @@ mean the same whatever you pick. The role decides what you see and what it is ca
 | Projects are called | Projects | Products | Customers | Areas |
 | Planned work | Planned work | Product work | Customer work | Strategy and planning |
 | Unplanned | Helping someone, Firefighting, Chasing information, Fixing data | Helping someone, Quality issues, Chasing answers, Fixing master data | Helping colleagues, Urgent customer issues, Chasing internally, Fixing prices and orders | Helping someone, Escalations, Chasing information |
-| Also | Meeting, Admin | Meeting, Travel, Admin | Internal meeting, Travel, Admin and CRM | People, Meeting, Admin |
+| Also | Admin | Travel, Admin | Travel, Admin and CRM | People, Admin |
+
+A meeting is not a kind of work in any role. Synla asks what it was for, so a meeting about an urgent issue counts as
+urgent work.
 
 ![Your role](docs/roles.png)
 
@@ -109,6 +121,9 @@ people. Nothing leaves your computer unless you copy it out yourself, for exampl
 app is using the microphone, so calls are not counted as away.
 
 **What it never records.** Keystrokes, screenshots, the clipboard, file contents, sound or web addresses.
+
+**Meetings.** Synla notes when you were in a call and asks what it was for. It never records sound, picture, chat or
+a transcript.
 
 **Private windows.** Password managers, private browsing, online banking and health sites are stored as "Private",
 with no name. You choose the list in `config.json`.
@@ -209,11 +224,13 @@ python -m synla demo
    as 4500-1203 or ECR-2026-0153, words, and signals such as "reads like a question", "sounds urgent" or "in a call".
    Years, dates, times and versions are not counted as numbers. In Outlook, Synla tells an email from a meeting invite
    and the calendar. Reading an invite is not a meeting, and the word "meeting" only counts in Teams, Zoom or Webex.
+   In Dynamics 365, the record type (account, case, sales order) and the record's name are clues of their own.
 3. **Guess.** Each clue votes for a project and a kind of work, from your keywords, a few built-in rules and your
    earlier answers. A clue that always meant the same thing counts fully; a clue seen everywhere, such as "Excel",
    counts for little. The very same window is trusted after one answer.
-4. **Kind of work.** Learned only from the window itself and its shape (a call, a chat, an email thread), never from
-   topic words, so one answer that a standup was a meeting doesn't make every window about the same project a meeting.
+4. **Kind of work.** Learned only from the window itself and its shape (a chat, an email thread, a record type such
+   as a case), never from topic words. Being in a call is not a kind of work: Synla asks what each meeting was for,
+   so one escalation call doesn't make every call firefighting.
 5. **Questions.** Below 70 % confidence for a window of 5 minutes or more, Synla asks, biggest first, at most five a
    day, together with time away from the computer. Stretches in a row with the same guess form one block; short,
    unclear glances join the block before.
@@ -222,8 +239,7 @@ Run the tests with `python -m pytest`. They run on Linux and Windows on every pu
 
 ## Next
 
-- Meetings recorded on their own: Synla notes that it was a meeting, and you only say what it was for. Most of a
-  leader's week is meetings, so "Meeting" as a kind of work says little.
+- Urgent work per customer or product, to see whose issues push planned work the most.
 - Workload limits for each role: a leader switches between windows far more than an analyst.
 - Calendar: Outlook meetings could fill in time away on their own, once other people's meeting titles can be kept
   private.

@@ -42,7 +42,7 @@ def measure(days: dict, summary: dict) -> dict:
             no_break += 1
         if span > LONG_DAY_HOURS:
             long_days += 1
-    meeting = summary["by_kind"].get("meeting", 0.0)
+    meeting = summary.get("meeting_hours", summary["by_kind"].get("meeting", 0.0))   # calls and meetings in a room
     return {
         "unplanned": round(summary["invisible_share"], 4),
         "focus": round(summary["focus_hours"] / hours, 4) if hours else 0.0,

@@ -146,7 +146,8 @@ class Synla:
         for e in self.store.manual():
             s = datetime.fromisoformat(e["start"]).astimezone()
             if start <= s < end:
-                out.append((Segment(s, datetime.fromisoformat(e["end"]).astimezone(), MANUAL_APP, MANUAL_TITLE), e))
+                out.append((Segment(s, datetime.fromisoformat(e["end"]).astimezone(), MANUAL_APP, MANUAL_TITLE,
+                                    bool(e.get("meeting"))), e))
         return out
 
     @staticmethod
@@ -232,9 +233,9 @@ class Synla:
         shown = list(roles.role(self.config)["kinds"])
         if u["since"] and datetime.now(timezone.utc) - u["since"] >= timedelta(days=FOLD_AFTER):
             shown = [k for k in shown if k == "project" or k in INVISIBLE or u["kinds"].get(k)]
-        if guess in KINDS and guess not in shown:
+        if guess in KINDS and guess not in shown and guess != "meeting":
             shown.append(guess)
-        return shown, [k for k in KINDS if k not in shown]
+        return shown, [k for k in KINDS if k not in shown and k != "meeting"]
 
     def last_day(self) -> date:
         """The last day the pages let you go to: today, or the end of the demo week."""
@@ -325,11 +326,12 @@ class Synla:
         state["answered"] = int(state.get("answered", 0)) + 1
         self.store.save_day_state(d, state)
 
-    def answer_gap(self, d: date, code: str, start_hm: str, end_hm: str, project: str, kind: str) -> str:
+    def answer_gap(self, d: date, code: str, start_hm: str, end_hm: str, project: str, kind: str,
+                   meeting: bool = True) -> str:
         """It was work: the time is added like any time away from the computer. You can shorten it first."""
         g = self._open_gap(d, code)
         snap = self._snapshot()
-        start = self.add_time(d, start_hm, end_hm, project, kind)
+        start = self.add_time(d, start_hm, end_hm, project, kind, meeting)
         self._away(d, g, "work")
         self._done(snap)
         return start
@@ -473,7 +475,7 @@ class Synla:
         self.reload()
 
     # ---- time away from the computer -------------------------------------------------------------------------
-    def add_time(self, d: date, start_hm: str, end_hm: str, project: str, kind: str):
+    def add_time(self, d: date, start_hm: str, end_hm: str, project: str, kind: str, meeting: bool = False):
         """Time the computer could not see: a site visit, a meeting in person, a phone call. No notes are stored."""
         s = datetime.combine(d, time.fromisoformat(start_hm)).astimezone()
         e = datetime.combine(d, time.fromisoformat(end_hm)).astimezone()
@@ -486,7 +488,8 @@ class Synla:
             xs, xe = datetime.fromisoformat(x["start"]), datetime.fromisoformat(x["end"])
             if s < xe and xs < e:
                 raise ValueError("This overlaps time you already added.")
-        entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind})
+        entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind}
+                       | ({"meeting": True} if meeting else {}))
         self.store.save_manual(entries)
         self._changed()
         return utc_key(s)
