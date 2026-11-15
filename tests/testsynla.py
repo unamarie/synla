@@ -11,7 +11,7 @@ import pytest
 from synla import demo, notify, protect, record, recorder, report, workload
 from synla.__main__ import verify
 from synla.app import DELETED, Synla
-from synla.model import MANUAL_APP
+from synla.model import KINDS, MANUAL_APP
 from synla.blocks import segments
 from synla.classify import Classifier
 from synla.context import features
@@ -840,3 +840,56 @@ def test_stretches_and_repeats_on_the_pages(app, server):
     week = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
     assert "Came back on" in week
     assert "Email in Outlook" in page and "Message (HTML)" not in page
+
+
+# ---- roles, and the choices you see ----------------------------------------------------------------------------------
+def test_each_role_gets_its_own_words_and_choices(app):
+    from synla import roles
+    expect = {"specialist": ("Project", "Planned work"), "product": ("Product", "Product work"),
+              "sales": ("Customer", "Customer work"), "leader": ("Area", "Strategy and planning")}
+    for key, (word, planned) in expect.items():
+        app.config["role"] = key
+        shown, more = app.kind_choices()
+        assert roles.word(app.config) == word and roles.say(app.config, "project") == planned
+        assert shown == list(roles.ROLES[key]["kinds"]) and len(shown) <= 8 and set(shown) | set(more) == set(KINDS)
+    assert "travel" in app.kind_choices()[1] and "people" in roles.ROLES["leader"]["kinds"]
+    app.config["role"] = "leader"
+    assert "datafixing" not in app.kind_choices()[0] and "datafixing" in app.kind_choices("datafixing")[0]
+    app.config["kindNames"] = {"firefighting": "Error handling"}
+    assert roles.say(app.config, "firefighting") == "Error handling"
+
+
+def test_projects_show_the_five_you_use_most_in_a_steady_order(app):
+    c = app.store.config()
+    c["projects"] = {p: {"keywords": []} for p in ("Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf")}
+    app.store.save_config(c)
+    app.reload()
+    assert app.project_choices()[0] == ["Alfa", "Bravo", "Charlie", "Delta", "Echo"]        # new: your first five
+    d = MONDAY.date()
+    for b, p in zip(app.day(d), ["Golf", "Golf", "Foxtrot", "Echo", "Delta", "Charlie"]):
+        app.answer_block(d, b.id, p, "project")
+    shown, more = app.project_choices()
+    assert shown == ["Charlie", "Delta", "Echo", "Foxtrot", "Golf"] and more == ["Alfa", "Bravo"]
+    assert app.project_choices("Alfa")[0][-1] == "Alfa"                                     # Synla's guess always shows
+
+
+def test_kinds_you_never_use_fold_away_after_four_weeks(app):
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    recent = datetime.now(timezone.utc) - timedelta(days=3)
+    app.store.save_decisions({old: {"end": old, "project": "Internal", "kind": "admin", "how": "block"},
+                              recent.isoformat(): {"end": (recent + timedelta(hours=1)).isoformat(),
+                                                   "project": "Internal", "kind": "project", "how": "block"}})
+    shown, more = app.kind_choices()
+    assert shown == ["project", "helping", "firefighting", "chasing", "datafixing"]   # unplanned kinds always stay
+    assert {"meeting", "admin"} <= set(more) and "meeting" in app.kind_choices("meeting")[0]
+
+
+def test_roles_over_http(app, server):
+    base, _ = server
+    assert "Analyst or specialist" in LOCAL.open(f"{base}/role").read().decode()
+    assert post(f"{base}/api/settings", {"role": "nobody"}, OK) == 400
+    assert post(f"{base}/api/settings", {"role": "sales", "kindNames": {"admin": "  CRM   and admin ", "x": "y"}}, OK) == 200
+    assert app.config["role"] == "sales" and app.config["kindNames"] == {"admin": "CRM and admin"}
+    page = LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
+    assert "<span class='lab'>Customer</span>" in page and "Customer work" in page and "CRM and admin" in page
+    assert "Which fits your work best?" not in page

@@ -134,6 +134,8 @@ def _features(app: str, title: str, call: bool) -> list:
         out.append(f"subject:{norm(t)[:60]}")
     if item == "invite":                       # reading or answering an invite is not the meeting itself
         out.append("is:invite")
+    if re.search(r"\b1\s*[:\-]\s*1\b|\bone[- ]on[- ]one\b|\b1to1\b|medarbeidersamtale|utviklingssamtale", t, re.I):
+        out.append("is:oneonone")             # a shape Synla can learn from: a leader may call these People
 
     # Teams/Slack: "Chat | Sales team" or "Sales team (Chat)"
     if re.search(r"\bchat\b", t, re.I):

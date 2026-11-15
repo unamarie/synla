@@ -20,22 +20,12 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import record, recorder, report, workload
+from . import record, recorder, report, roles, workload
 from .classify import ASK_BELOW
 from .context import outlook_item, strip_app
 from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN
 
-# Kinds of work as the pages say them, in the order of the buttons (keys q to u)
-KIND_ORDER = ("project", "meeting", "helping", "firefighting", "chasing", "datafixing", "admin")
-SAY = {"project": "Planned work", "meeting": "Meeting", "helping": "Helping someone", "firefighting": "Firefighting",
-       "chasing": "Chasing information", "datafixing": "Fixing data", "admin": "Admin"}
-SHORT = {"helping": "Helping", "firefighting": "Firefighting", "chasing": "Chasing", "datafixing": "Fixing data"}
-TIP = {"project": "Work on the project itself", "meeting": "Meetings and calls",
-       "helping": "Questions from colleagues, showing someone how",
-       "firefighting": "Something broke and had to be fixed now",
-       "chasing": "Asking for, or waiting for, what you need to do your work",
-       "datafixing": "Cleaning up data that someone else got wrong", "admin": "Email, timesheets and other admin"}
-KEYS = "qwertyu"
+KEYS = "qwertyui"                         # keys for the kinds of work you see, in order
 COUNT = {1: "One quick question", 2: "Two quick questions", 3: "Three quick questions", 4: "Four quick questions",
          5: "Five quick questions"}
 APPS = {"excel.exe": "Excel", "winword.exe": "Word", "powerpnt.exe": "PowerPoint", "outlook.exe": "Outlook",
@@ -111,6 +101,17 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px var(--c)}
 .chip.ghost{color:var(--muted);border-style:dashed;padding-left:14px}
 .gap.isnotwork .kinds{opacity:.35;pointer-events:none}
+.chip[hidden]{display:none}.more:not([hidden]){display:contents}
+.find{font:inherit;font-size:.95rem;border:1.5px solid var(--line);border-radius:999px;padding:6px 14px;background:var(--surface);color:var(--ink);width:220px}
+.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.rolecard{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;text-align:left;background:var(--surface);
+ border:1.5px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer;color:var(--ink)}
+.rolecard:hover{border-color:var(--muted)}.rolecard.on{border-color:var(--sea);box-shadow:inset 0 0 0 1px var(--sea)}
+.rolecard small{display:block;color:var(--muted);margin-top:4px;line-height:1.35}
+.knames{display:grid;gap:8px;max-width:620px;margin-top:8px}
+.kname{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;align-items:center;font-size:.92rem;color:var(--muted)}
+.kname input{font:inherit;width:100%;min-width:0;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.rolepick{margin:0 0 18px}.rolepick .buttons{margin-top:10px}
 .chip .sw{width:10px;height:10px;border-radius:50%}
 .newp input{font:inherit;font-size:.95rem;border:1.5px solid var(--sea);border-radius:999px;padding:6px 14px;background:var(--surface);color:var(--ink);width:200px}
 .key{font-size:.72rem;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;background:var(--paper);min-width:18px;text-align:center}
@@ -157,7 +158,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .pr span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pb{background:var(--track);height:10px;border-radius:5px;overflow:hidden}.pb span{display:block;height:100%;border-radius:5px}
 .pv{text-align:right;font-weight:700}
-.inv{list-style:none;margin:0;padding:0;font-size:.92rem}.inv li{display:grid;grid-template-columns:96px minmax(0,1fr) auto;gap:8px;padding:7px 0;border-top:1px solid var(--line)}
+.inv{list-style:none;margin:0;padding:0;font-size:.92rem}.inv li{display:grid;grid-template-columns:118px minmax(0,1fr) auto;gap:8px;padding:7px 0;border-top:1px solid var(--line)}
 .inv li:first-child{border-top:0}.inv i{font-style:normal;color:var(--muted)}.inv span{overflow-wrap:anywhere}.inv b{white-space:nowrap}
 .inv small{display:block;color:var(--muted);font-size:.8rem;margin-top:2px}
 .sealed{display:flex;align-items:center;gap:14px}.sealed > div{flex:1;min-width:0}
@@ -167,7 +168,7 @@ table{border-collapse:collapse;width:100%}
 td,th{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:.88rem}tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;white-space:nowrap}td.lvl,td.nw{white-space:nowrap}td.lim{white-space:nowrap}tr.total td{font-weight:700;border-top:2px solid var(--line)}
-.panel table{margin:-4px 0}
+.panel table{margin:-4px 0}.panel:has(table){overflow-x:auto}
 h1{font-size:1.6rem;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 18px}
 h2{font-size:1.05rem;margin:26px 0 8px}
 .tiles{display:flex;gap:8px;flex-wrap:wrap}.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 10px;
@@ -187,14 +188,14 @@ ul.plain{margin:6px 0;padding-left:20px}ul.plain li{margin:4px 0}
 @media (max-width:720px){.top .in{gap:8px;padding:10px 12px}nav a{padding:6px 7px;font-size:.92rem}.brand{font-size:1rem}.rec span{display:none}main{padding:20px 14px 80px}
  .row{grid-template-columns:1fr;gap:6px}.lab{padding-top:0}.hint{margin-left:0}.ask{padding:18px 16px}.two{grid-template-columns:1fr}
  .crow{grid-template-columns:1fr auto}.crow .t,.crow .by{display:none}.crow .pj{grid-column:1}.weekgrid{gap:6px}.stack{width:80%;height:160px}
- .sealed{flex-wrap:wrap}.sealed > div{flex-basis:calc(100% - 50px)}.sealed .save{width:100%;justify-content:center}td.lim{white-space:normal}
+ .kname{grid-template-columns:1fr;gap:4px}.sealed{flex-wrap:wrap}.sealed > div{flex-basis:calc(100% - 50px)}.sealed .save{width:100%;justify-content:center}td.lim{white-space:normal}
  .big{font-size:2.1rem}.key{display:none}}
 @media print{.top,.act,.buttons,.quiet,button,#toast,.noprint{display:none!important}body{background:#fff;color:#000}
  .panel,.card{border-color:#999}main{padding:0}}
 """
 
 JS = r"""
-const TOKEN=document.querySelector('meta[name=synla-token]').content;
+const TOKEN=document.querySelector('meta[name=synla-token]').content,WORD=document.querySelector('meta[name=synla-word]').content;
 const $=(q,el=document)=>el.querySelector(q), $$=(q,el=document)=>[...el.querySelectorAll(q)];
 async function post(url,body){
  let r;
@@ -217,13 +218,15 @@ function toast(msg,undo){
  const t=$('#toast');$('.msg',t).textContent=msg;const b=$('button',t);b.hidden=!undo;b.dataset.undo=undo||'';
  t.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>t.classList.remove('show'),undo?10000:5000);
 }
-function pick(c){if(!c)return;$$('.chip[data-v]',c.parentElement).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)});
+function reveal(c){const m=c.closest('.more');if(m&&m.hidden){m.hidden=false;const b=m.nextElementSibling;if(b&&b.matches('[data-showmore]'))b.hidden=true}}
+function direct(card,sel){const g=$(sel,card);return g?$$(':scope > .chip[data-v]:not([data-notwork])',g):[]}
+function pick(c){if(!c)return;reveal(c);$$('.chip[data-v]',c.closest('.chips')).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)});
  const g=c.closest('.gap');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'))}
 function choose(box,sel,v){const c=$$(sel+' .chip[data-v]',box).find(x=>x.dataset.v===v);if(c)pick(c);else $$(sel+' .chip',box).forEach(x=>x.classList.remove('on'))}
 const active=()=>{const e=$('#editor');return e&&!e.hidden?e:$('.ask.q')};
 async function saveGap(card){
  const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
- if(!p){toast('Pick a project, or Not work.');return}
+ if(!p){toast('Pick a '+WORD+', or Not work.');return}
  const body={date:card.dataset.date,code:card.dataset.code};
  if(p.hasAttribute('data-notwork'))body.notWork=true;
  else{if(!k){toast('Pick a kind of work.');return}
@@ -235,7 +238,7 @@ async function saveGap(card){
 async function save(card){
  if(card.dataset.type==='gap')return saveGap(card);
  const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
- if(!p){toast('Pick a project first.');return}
+ if(!p){toast('Pick a '+WORD+' first.');return}
  if(!k){toast('Pick a kind of work.');return}
  const res=await post('/api/answer',{date:card.dataset.date,ids:JSON.parse(card.dataset.ids),how:card.dataset.how,
   asked:card.dataset.asked==='1',project:p.dataset.v,kind:k.dataset.v});
@@ -246,10 +249,10 @@ async function skip(card){
  const res=await post('/api/skip',{date:card.dataset.date,code:card.dataset.code});
  if(res){await refresh();toast("Skipped. It keeps Synla's best guess.",res.undo)}
 }
-const NEWP="<button type='button' class='chip ghost' data-newproject>+ New project</button>";
+const NEWP="<button type='button' class='chip ghost' data-newproject>+ New "+WORD+"</button>";
 function newProject(btn){
  const wrap=btn.closest('.newp');
- wrap.innerHTML="<input type='text' maxlength='60' placeholder='Project name, then Enter' aria-label='New project name'>";
+ wrap.innerHTML="<input type='text' maxlength='60' placeholder='Name, then Enter' aria-label='New "+WORD+" name'>";
  const input=$('input',wrap);input.focus();
  input.addEventListener('keydown',async e=>{
   if(e.key==='Escape'){wrap.innerHTML=NEWP;return}
@@ -260,7 +263,7 @@ function newProject(btn){
    if($$('.chip[data-v]',g).some(x=>x.dataset.v===res.name))return;
    const c=document.createElement('button');c.type='button';c.className='chip';c.dataset.v=res.name;c.style.setProperty('--c',res.color);
    const sw=document.createElement('i');sw.className='sw';sw.style.background=res.color;c.append(sw,document.createTextNode(res.name));
-   g.insertBefore(c,$('.newp',g));
+   g.insertBefore(c,g.querySelector(':scope > .more, :scope > .newp, :scope > [data-showmore]'));
   });
   const box=wrap.closest('.ask,.away');wrap.innerHTML=NEWP;choose(box,'.chips.p',res.name);
  });
@@ -277,7 +280,7 @@ function change(row){
 async function addTime(box){
  const p=$('.chips.p .chip.on',box),k=$('.chips.k .chip.on',box),from=$('.from',box).value,to=$('.to',box).value;
  if(!from||!to){toast('Fill in from and to.');return}
- if(!p){toast('Pick a project.');return}
+ if(!p){toast('Pick a '+WORD+'.');return}
  const res=await post('/api/time',{date:box.dataset.date,start:from,end:to,project:p.dataset.v,kind:k?k.dataset.v:''});
  if(res){await refresh();toast('Added '+from+' to '+to+'.','time:'+res.id)}
 }
@@ -286,6 +289,10 @@ document.addEventListener('click',async e=>{
  const m=$('#menu');if(m&&m.open&&!on('#menu'))m.open=false;
  if(b=on('.chip[data-v]')){pick(b);return}
  if(b=on('[data-newproject]')){newProject(b);return}
+ if(b=on('[data-showmore]')){const m=b.previousElementSibling;m.hidden=false;b.hidden=true;const f=$('.find',m);if(f)f.focus();return}
+ if(b=on('[data-role]')){if(await post('/api/settings',{role:b.dataset.role}))location.reload();return}
+ if(b=on('[data-savenames]')){const names={};$$('.kindname').forEach(x=>names[x.dataset.kind]=x.value);
+  if(await post('/api/settings',{kindNames:names}))location.reload();return}
  if(b=on('[data-save]')){save(b.closest('.ask'));return}
  if(b=on('[data-skip]')){skip(b.closest('.ask'));return}
  if(b=on('[data-cancel]')){$('#editor').hidden=true;return}
@@ -308,16 +315,24 @@ document.addEventListener('click',async e=>{
  if(b=on('[data-delete]')){if(confirm(b.dataset.confirm)&&await post('/api/delete',{what:b.dataset.delete})){await refresh();toast('Deleted.')}return}
  if(b=on('[data-print]')){window.print();return}
 });
+document.addEventListener('input',e=>{
+ if(!e.target.matches('.find'))return;const q=e.target.value.trim().toLowerCase();
+ $$('.chip[data-v]:not([data-notwork])',e.target.closest('.chips')).forEach(c=>c.hidden=!!q&&!c.dataset.v.toLowerCase().includes(q));
+});
 document.addEventListener('keydown',e=>{
  if(e.metaKey||e.ctrlKey||e.altKey)return;
  const m=$('#menu');if(e.key==='Escape'&&m&&m.open){m.open=false;return}
  if(e.key==='Enter'&&e.target.matches('.ask.q .times input')){e.preventDefault();save(e.target.closest('.ask'));return}
+ if(e.target.matches('.find')){
+  if(e.key==='Enter'){e.preventDefault();const c=$$('.chip[data-v]:not([data-notwork])',e.target.closest('.chips')).find(x=>!x.hidden);if(c){pick(c);e.target.blur()}}
+  if(e.key==='Escape')e.target.blur();
+  return}
  if(e.target.closest('input,textarea,select'))return;
  const card=active();if(!card)return;const k=e.key.toLowerCase();
- if(/^[1-9]$/.test(k)){pick($$('.chips.p .chip[data-v]:not([data-notwork])',card)[+k-1]);e.preventDefault();return}
+ if(/^[1-9]$/.test(k)){pick(direct(card,'.chips.p')[+k-1]);e.preventDefault();return}
  if(k==='0'){pick($('.chips.p [data-notwork]',card));e.preventDefault();return}
- const i=k.length===1?'qwertyu'.indexOf(k):-1;
- if(i>=0){pick($$('.chips.k .chip[data-v]',card)[i]);e.preventDefault();return}
+ const i=k.length===1?'qwertyui'.indexOf(k):-1;
+ if(i>=0){pick(direct(card,'.chips.k')[i]);e.preventDefault();return}
  if(e.key==='Enter'&&(e.target===document.body||e.target.closest('.chip'))){e.preventDefault();save(card);return}
  if(e.key==='Escape'){if(card.id==='editor')card.hidden=true;else skip(card)}
 });
@@ -408,24 +423,44 @@ def ids_attr(ids) -> str:
     return escape(json.dumps(list(ids)), quote=True)
 
 
-def project_chips(app, picked: str = "", keys: bool = True, first: str = "") -> str:
-    order = ([first] if first in app.projects else []) + [p for p in app.projects if p != first]
-    out = []
-    for i, p in enumerate(order):
+def project_chips(app, picked: str = "", keys: bool = True) -> str:
+    """The projects you use most as buttons, in your list's order, Synla's guess if it is another one, and the rest
+    one search away under More."""
+    shown, more = app.project_choices(picked)
+    w = escape(roles.word(app.config).lower())
+
+    def chip(p, i=None):
         c = color(app, p)
-        key = f"<span class='key'>{i + 1}</span>" if keys and i < 9 else ""
+        key = f"<span class='key'>{i + 1}</span>" if keys and i is not None and i < 9 else ""
         on = p == picked
-        out.append(f"<button type='button' class='chip{' on' if on else ''}' aria-pressed='{str(on).lower()}' "
-                   f"data-v='{escape(p, quote=True)}' style='--c:{c}'>{key}<i class='sw' style='background:{c}'></i>"
-                   f"{escape(p)}</button>")
-    return "".join(out) + "<span class='newp'><button type='button' class='chip ghost' data-newproject>+ New project</button></span>"
+        return (f"<button type='button' class='chip{' on' if on else ''}' aria-pressed='{str(on).lower()}' "
+                f"data-v='{escape(p, quote=True)}' style='--c:{c}'>{key}<i class='sw' style='background:{c}'></i>"
+                f"{escape(p)}</button>")
+    new = f"<span class='newp'><button type='button' class='chip ghost' data-newproject>+ New {w}</button></span>"
+    html = "".join(chip(p, i) for i, p in enumerate(shown))
+    if not more:
+        return html + new
+    return (html + f"<span class='more' hidden><input type='search' class='find' placeholder='Find a {w}' "
+            f"aria-label='Find a {w}'>{''.join(chip(p) for p in more)}{new}</span>"
+            f"<button type='button' class='chip ghost' data-showmore>More ({len(more)})</button>")
 
 
-def kind_chips(picked: str = "project", keys: bool = True) -> str:
-    return "".join(
-        f"<button type='button' class='chip{' on' if k == picked else ''}' aria-pressed='{str(k == picked).lower()}' "
-        f"data-v='{k}' data-label='{SAY[k]}' title='{escape(TIP[k], quote=True)}'>"
-        f"{f'<span class=key>{KEYS[i]}</span>' if keys else ''}{SAY[k]}</button>" for i, k in enumerate(KIND_ORDER))
+def kind_chips(app, picked: str = "project", keys: bool = True) -> str:
+    """Your role's kinds of work, in its order, with your own names; the others under More."""
+    shown, more = app.kind_choices(picked)
+
+    def chip(k, i=None):
+        label = roles.say(app.config, k)
+        key = f"<span class='key'>{KEYS[i]}</span>" if keys and i is not None and i < len(KEYS) else ""
+        on = k == picked
+        return (f"<button type='button' class='chip{' on' if on else ''}' aria-pressed='{str(on).lower()}' data-v='{k}' "
+                f"data-label='{escape(label, quote=True)}' title='{escape(roles.TIP.get(k, ''), quote=True)}'>"
+                f"{key}{escape(label)}</button>")
+    html = "".join(chip(k, i) for i, k in enumerate(shown))
+    if more:
+        html += (f"<span class='more' hidden>{''.join(chip(k) for k in more)}</span>"
+                 f"<button type='button' class='chip ghost' data-showmore>More</button>")
+    return html
 
 
 def why(g) -> str:
@@ -468,14 +503,15 @@ def menu(app) -> str:
     else:
         pause = "<button data-pause='60'>Pause for 1 hour</button><button data-pause='rest'>Pause until tomorrow</button>"
     return (f"<details class='menu' id='menu'><summary aria-label='More'>⋯</summary><div class='pop'>{pause}<hr>"
-            f"<a href='/week/timesheet'>Timesheet</a><a href='/year'>Year report</a><a href='/data'>Your data</a></div></details>")
+            f"<a href='/week/timesheet'>Timesheet</a><a href='/year'>Year report</a><a href='/role'>Your role and words</a>"
+            f"<a href='/data'>Your data</a></div></details>")
 
 
 def page(app, title: str, body: str, token: str, here: str = "") -> str:
     nav = "".join(f"<a href='{u}' class='{'on' if k == here else ''}'>{t}</a>"
                   for u, t, k in (("/", "Today", "today"), ("/week", "Week", "week"), ("/record", "Record book", "record")))
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-            f"<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='synla-token' content='{escape(token)}'>"
+            f"<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='synla-token' content='{escape(token)}'><meta name='synla-word' content='{escape(roles.word(app.config).lower())}'>"
             f"<title>{escape(title)} · Synla</title><style>{CSS}</style></head><body>"
             f"<header class='top'><div class='in'><a class='brand' href='/'>Synla</a><nav>{nav}</nav>{status(app)}{menu(app)}</div></header>"
             f"<main>{body}</main><div id='toast' role='status' aria-live='polite'><span class='msg'></span>"
@@ -537,9 +573,9 @@ def ask_card(app, d: date, q: dict) -> str:
 <div class='askhead'><span>{COUNT.get(n, f"{n} quick questions")}</span><span class='prog'>{dots}</span></div>
 <h2>What was this?</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
 <div class='meta'>{escape(" · ".join(meta))}</div>
-<div class='row'><span class='lab'>Project</span><div class='chips p'>{project_chips(app, known, first=known)}</div></div>
+<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known)}</div></div>
 <div class='hint'>{hint}</div>
-<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(g.kind if g.kind in KINDS else "project")}</div></div>
+<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, g.kind if g.kind in KINDS else "project")}</div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
 <button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
 
@@ -555,9 +591,9 @@ def gap_card(app, d: date, q: dict) -> str:
 <div class='askhead'><span>{COUNT.get(n, f"{n} quick questions")}</span><span class='prog'>{dots}</span></div>
 <h2>What was this?</h2><div class='what'>Away from the computer</div>
 <div class='meta'>{hm(it["minutes"])} · {a:%H:%M} to {b:%H:%M}</div>
-<div class='row'><span class='lab'>Project</span><div class='chips p'>{notwork}{project_chips(app)}</div></div>
+<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{notwork}{project_chips(app)}</div></div>
 <div class='hint'>Not work is enough. Synla never asks why, and keeps only the time.</div>
-<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips("meeting")}</div></div>
+<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "meeting")}</div></div>
 <div class='row kinds'><span class='lab'>When</span><div class='times'><input type='time' class='from' value='{a:%H:%M}'
 aria-label='From'> to <input type='time' class='to' value='{b:%H:%M}' aria-label='To'></div></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
@@ -612,14 +648,14 @@ def check_section(app, d: date, bl: list) -> str:
             f"<span class='w'><b>{escape(shown(b.main.title, b.main.app))}</b><small>{escape(where(b.main.app, b.main.title))}{more} · "
             f"{hm(b.minutes)}</small></span>"
             f"<span class='pj'><i class='sw {'uns' if who == 'unsure' else ''}' style='background:{color(app, p)}'></i>"
-            f"<span>{escape(p)}<small>{SAY.get(b.guess.kind, '')}</small></span></span>"
+            f"<span>{escape(p)}<small>{escape(roles.say(app.config, b.guess.kind)) if b.guess.kind in KINDS else ''}</small></span></span>"
             f"<span class='by {who}'>{tag}</span>{act}</div>")
     guesses = sum(1 for b in bl if not b.confirmed and not unsure(b))
     foot = (f"<div class='foot'><span class='note'>Looks right? This marks Synla's {guesses} guesses as checked by you.</span>"
             f"<button class='btn' data-approve='{d}'>All correct</button></div>") if guesses else ""
     editor = (f"<div id='editor' class='ask edit' hidden data-date='{d}' data-how='block' data-ids='[]'><div class='scope'></div>"
-              f"<div class='row'><span class='lab'>Project</span><div class='chips p'>{project_chips(app)}</div></div>"
-              f"<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips('')}</div></div>"
+              f"<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app)}</div></div>"
+              f"<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, '')}</div></div>"
               f"<div class='act'><button type='button' class='skip' data-cancel>Cancel</button>"
               f"<button type='button' class='save' data-save>Save</button></div></div>")
     return (f"<section class='panel' id='check' data-panel hidden><h3>The whole day</h3>{''.join(rows)}{foot}{editor}</section>")
@@ -630,9 +666,42 @@ def away_section(app, d: date) -> str:
 <p class='note'>A site visit, a meeting in a room, a phone call. Only the time, project and kind are kept, no notes.</p>
 <div class='row'><span class='lab'>When</span><div class='times'><input type='time' class='from' aria-label='From'> to
 <input type='time' class='to' aria-label='To'></div></div>
-<div class='row'><span class='lab'>Project</span><div class='chips p'>{project_chips(app, keys=False)}</div></div>
-<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips("meeting", keys=False)}</div></div>
+<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, keys=False)}</div></div>
+<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, "meeting", keys=False)}</div></div>
 <div class='act'><button type='button' class='save' data-addtime>Add</button></div></section>"""
+
+
+def role_card(app) -> str:
+    """Shown once, until you pick a role."""
+    if app.config.get("role"):
+        return ""
+    buttons = "".join(f"<button class='btn' data-role='{k}'>{escape(r['name'])}</button>" for k, r in roles.ROLES.items())
+    return (f"<section class='panel rolepick'><b>Which fits your work best?</b> <span class='note'>It picks the words and "
+            f"the choices you see. Change it any time under ⋯.</span><div class='buttons'>{buttons}</div></section>")
+
+
+def role_page(app, token: str) -> str:
+    current = app.config.get("role") or roles.DEFAULT
+    plain = {**app.config, "kindNames": {}}
+    cards = "".join(
+        f"<button class='rolecard{' on' if k == current else ''}' data-role='{k}'><b>{escape(r['name'])}</b>"
+        f"<small>{escape(r['word'][1])}. "
+        + escape(", ".join(roles.say({**plain, "role": k}, x) for x in r["kinds"])) + "</small></button>"
+        for k, r in roles.ROLES.items())
+    own = app.config.get("kindNames") or {}
+    names = "".join(
+        f"<label class='kname'><span>{escape(roles.say(plain, k))}</span><input class='kindname' data-kind='{k}' maxlength='40' "
+        f"value='{escape(own.get(k, '') if isinstance(own.get(k), str) else '', quote=True)}' "
+        f"placeholder='{escape(roles.say(plain, k), quote=True)}'></label>" for k in roles.role(app.config)["kinds"])
+    body = f"""<h1>Your role</h1><p class='sub'>It picks the words and the choices you see. Underneath, every role counts the
+same way, so the workload numbers, the record book and earlier weeks mean the same whatever you pick.</p>
+<section class='panel'><div class='roles'>{cards}</div></section>
+<h2>Your own words</h2><section class='panel'><p class='note'>Call a kind of work what you call it, for example Error
+handling instead of Firefighting. Leave a box empty to use your role's word.</p><div class='knames'>{names}</div>
+<div class='buttons'><button class='btn' data-savenames>Save</button></div></section>
+<p class='note'>Buttons you have not used for four weeks move under More, except planned work and the kinds of unplanned
+work, which are what Synla measures. Projects show the five you use most, and the rest are one search away.</p>"""
+    return page(app, "Your role", body, token)
 
 
 def today_page(app, d: date, token: str) -> str:
@@ -661,8 +730,8 @@ def today_page(app, d: date, token: str) -> str:
     asked = None
     if first:
         asked = [(first["start"], first["end"])] if first["type"] == "gap" else [tuple(x) for x in stretches(first["spans"])]
-    body = (head + (timeline(app, d, bl, asked) if bl else "") + card + quiet + (check_section(app, d, bl) if bl else "")
-            + away_section(app, d))
+    body = (role_card(app) + head + (timeline(app, d, bl, asked) if bl else "") + card + quiet
+            + (check_section(app, d, bl) if bl else "") + away_section(app, d))
     return page(app, "Today" if d == app.today() else day_title(d), body, token, "today" if d == app.today() else "")
 
 
@@ -718,14 +787,14 @@ def week_view(app, monday: date) -> dict | None:
     total = st["totalHours"]
     v.update(hours=total, unplanned=sum(inv.values()), share=sum(inv.values()) / total if total else 0.0, live=False,
              assessed=workload.assess(st.get("workload", {}), app.config),
-             top=[(k, SAY[k], h, None) for k, h in sorted(inv.items(), key=lambda kv: -kv[1])])
+             top=[(k, roles.say(app.config, k), h, None) for k, h in sorted(inv.items(), key=lambda kv: -kv[1])])
     return v
 
 
-def unplanned_row(kind: str, what: str, hours: float, back: dict | None) -> str:
+def unplanned_row(app, kind: str, what: str, hours: float, back: dict | None) -> str:
     again = (f"<small>Came back on {back['days']} days since {back['since'].day} {back['since']:%b}, "
              f"{back['hours']:.1f} h in all</small>" if back else "")
-    return f"<li><i>{SHORT.get(kind, kind)}</i><span>{escape(what)}{again}</span><b>{hours:.1f} h</b></li>"
+    return f"<li><i>{escape(roles.say(app.config, kind))}</i><span>{escape(what)}{again}</span><b>{hours:.1f} h</b></li>"
 
 
 def record_panel(app, monday: date, status: dict) -> str:
@@ -796,13 +865,13 @@ def week_page(app, d: date, token: str) -> str:
     prow = "".join(f"<div class='pr'><span>{escape(p)}</span><span class='pb'><span class='{'uns' if p == NOT_SORTED else ''}' "
                    f"style='width:{h / pmax * 100:.0f}%;background:{color(app, p)}'></span></span><span class='pv'>{h:.1f} h</span></div>"
                    for p, h in sorted(v["projects"].items(), key=lambda kv: (kv[0] == NOT_SORTED, -kv[1])))
-    inv = "".join(unplanned_row(k, w, h, r) for k, w, h, r in v["top"][:3])
+    inv = "".join(unplanned_row(app, k, w, h, r) for k, w, h, r in v["top"][:3])
     more = (f"<p class='note'><a href='/week/indicators?date={monday}#unplanned'>All of it ›</a></p>" if len(v["top"]) > 3 else "")
     deleted = ("" if v["live"] else "<p class='note'>The details for this week have been deleted. This is the week as sealed "
                "in your record book.</p>")
     body = f"""<div class='dayhead'><div>{nav}<div class='big'>{v['hours']:.1f} h</div></div></div>{deleted}{verdict}
 <div class='weekgrid'>{''.join(cols)}</div>
-<div class='two'><section class='panel'><h3>Projects</h3>{prow}</section>
+<div class='two'><section class='panel'><h3>{roles.word(app.config, True)}</h3>{prow}</section>
 <section class='panel'><h3>Unplanned work <span class='pill'>{v['share']:.0%} · {v['unplanned']:.1f} h</span></h3>
 {f"<ul class='inv'>{inv}</ul>" if inv else "<p class='note'>None this week.</p>"}{more}</section></div>
 {record_panel(app, monday, v['status'])}
@@ -842,7 +911,7 @@ def timesheet_page(app, d: date, token: str) -> str:
     tsv = "\n".join(["Project\t" + "\t".join(f"{day:%a %d.%m}" for day in ts) + "\tTotal"] +
                     [f"{p}\t" + "\t".join(f"{ts[day].get(p, 0):g}" for day in ts)
                      + f"\t{sum(ts[day].get(p, 0) for day in ts):g}" for p in projects])
-    table = (f"<section class='panel'><table><tr><th>Project</th>{head}<th class='num'>Total</th></tr>{rows}{totals}</table></section>"
+    table = (f"<section class='panel'><table><tr><th>{roles.word(app.config)}</th>{head}<th class='num'>Total</th></tr>{rows}{totals}</table></section>"
              if ts else "<section class='done'><span class='ok open'></span><div><b>Nothing recorded this week.</b></div></section>")
     body = f"""<h1>Timesheet</h1><p class='sub'>{week_title(monday)} · <a href='/week?date={monday}'>back to the week</a></p>
 {table}<div class='buttons noprint'><a class='btn' href='/export.csv?date={monday}'>Download CSV</a>
@@ -871,7 +940,7 @@ def indicators_page(app, d: date, token: str) -> str:
     tiles = "".join(f"<a class='tile' href='/week?date={r['monday']}'>week {r['monday'].isocalendar()[1]}"
                     f"<b><span class='dot {r['level']}'></span> {r['hours']:.0f} h</b>{r['unplanned']:.0%} unplanned</a>"
                     for r in app.trend(monday))
-    inv = "".join(unplanned_row(k, w, h, r) for k, w, h, r in v["top"])
+    inv = "".join(unplanned_row(app, k, w, h, r) for k, w, h, r in v["top"])
     body = f"""<h1>Workload</h1><p class='sub'>{week_title(monday)} · <a href='/week?date={monday}'>back to the week</a></p>
 <div class='verdict {a['level']}'><span class='dot {a['level']} big'></span><div><b>{a['level'].capitalize()} week.</b>
 {escape(workload.sentence(a))}</div></div>
@@ -966,7 +1035,7 @@ Year report<a class='step{' off' if y >= app.last_day().year else ''}' href='/ye
 <section class='panel'><table><tr><th>Week</th><th>Monday</th><th class='num'>Hours</th><th class='num'>Above {weekly:g}</th>
 <th class='num'>Outside hours</th><th class='num'>Unplanned</th><th>Workload</th><th>Record</th><th>Fingerprint</th></tr>
 {body_rows or "<tr><td colspan=9 class='note'>Nothing this year.</td></tr>"}</table></section>
-<section class='panel'><h3>Projects</h3>{prow or "<p class='note'>Nothing yet.</p>"}</section>
+<section class='panel'><h3>{roles.word(app.config, True)}</h3>{prow or "<p class='note'>Nothing yet.</p>"}</section>
 <p class='note'>Active time on the computer, plus time you added. It is not the same as paid working time. Sorted by Synla
 on its own: {tot['unconfirmed']:.1f} h. Made from your record book on {date.today().day} {date.today():%B %Y}.</p>"""
     return page(app, f"Year {y}", body, token)
@@ -1112,6 +1181,8 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                     name, text = statement_file(app, int(q["seq"][0]))
                     return self._send(200, text, "application/json; charset=utf-8",
                                       {"Content-Disposition": f"attachment; filename={name}"})
+                if u.path == "/role":
+                    return self._send(200, role_page(app, token))
                 if u.path == "/data":
                     return self._send(200, data_page(app, token))
                 if u.path == "/export.csv":
@@ -1193,6 +1264,14 @@ def make_handler(app, token: str, port: int, seen: list | None = None):
                         c["recordEmail"] = email
                     if "askAboutGaps" in body:
                         c["askAboutGaps"] = bool(body["askAboutGaps"])
+                    if "role" in body:
+                        if body["role"] not in roles.ROLES:
+                            return self._send(400, "Unknown role.", "text/plain")
+                        c["role"] = body["role"]
+                    if "kindNames" in body:
+                        given = body["kindNames"] if isinstance(body["kindNames"], dict) else {}
+                        c["kindNames"] = {k: " ".join(str(v).split())[:40] for k, v in given.items()
+                                          if k in KINDS and str(v).strip()}
                     app.store.save_config(c)
                     app.reload()
                 elif path == "/api/delete":
