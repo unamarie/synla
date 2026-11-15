@@ -29,6 +29,9 @@ employer could use to monitor anyone.
 - **Shows what keeps coming back.** When the same failure or cleanup returns, the week says so: "Came back on
   4 days since 12 Aug, 6.5 h in all". Window names are deleted after 30 days, so Synla keeps counting for 90 days with
   one-way codes, the same way it stores what it learns.
+- **Fits your role.** Pick Analyst or specialist, Product owner, Sales or Leader. The buttons, their order and their
+  names follow the role, and you can rename any of them. Projects show the five you use most, with a search for the
+  rest. After four weeks, kinds of work you never use move under More. The order stays put, so the keys do too.
 - **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
   from it.
 - **Keeps meetings.** In a call you don't touch the keyboard, so other trackers count you as away. Synla knows when
@@ -82,6 +85,20 @@ conversation, a dispute.
 This is your own record, not the official one. Your employer keeps the official record of working hours. A record made
 at the time, never changed afterwards and timestamped outside your own computer carries more weight than memory, but
 how much it counts in a dispute is for your union representative or a lawyer to judge. This is not legal advice.
+
+## Roles
+
+Underneath, every role counts the same kinds of work, so the workload numbers, the record book and earlier weeks
+mean the same whatever you pick. The role decides what you see and what it is called.
+
+| | Analyst or specialist | Product owner | Sales | Leader |
+|---|---|---|---|---|
+| Projects are called | Projects | Products | Customers | Areas |
+| Planned work | Planned work | Product work | Customer work | Strategy and planning |
+| Unplanned | Helping someone, Firefighting, Chasing information, Fixing data | Helping someone, Quality issues, Chasing answers, Fixing master data | Helping colleagues, Urgent customer issues, Chasing internally, Fixing prices and orders | Helping someone, Escalations, Chasing information |
+| Also | Meeting, Admin | Meeting, Travel, Admin | Internal meeting, Travel, Admin and CRM | People, Meeting, Admin |
+
+![Your role](docs/roles.png)
 
 ## Built for the employee
 
@@ -164,6 +181,8 @@ python -m synla demo
    ```
 
    Keywords can be numbers: `"4500-"` matches every item number that starts with 4500, in ERP and PLM screens too.
+   The first time you open Synla, pick the role that fits your work. You can change it under **⋯ > Your role and
+   words**.
 
 3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions, including
    the ones about time away from the computer. To see what Synla sorted on its own, click **Check**.
@@ -203,7 +222,9 @@ Run the tests with `python -m pytest`. They run on Linux and Windows on every pu
 
 ## Next
 
-- Words for each role: labels and limits that fit sales, product owners and leaders, and "Travel" as a kind of work.
+- Meetings recorded on their own: Synla notes that it was a meeting, and you only say what it was for. Most of a
+  leader's week is meetings, so "Meeting" as a kind of work says little.
+- Workload limits for each role: a leader switches between windows far more than an analyst.
 - Calendar: Outlook meetings could fill in time away on their own, once other people's meeting titles can be kept
   private.
 - Rules you can see and edit: "files in this folder belong to this project".

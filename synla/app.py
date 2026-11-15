@@ -2,9 +2,9 @@
 import secrets
 import time as clock
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
-from . import protect, recorder, report, workload
+from . import protect, recorder, report, roles, workload
 from .blocks import _subtract, blocks, segments
 from .classify import ASK_BELOW, Classifier
 from .blocks import NOISE
@@ -20,6 +20,8 @@ AUTO_SEAL_AFTER = 7      # days after a week ends, an unsealed week is sealed as
 CACHE_SECONDS = 20       # a page asks for the same days several times; read them once
 QUESTIONS_PER_DAY = 5    # Synla asks about at most this many windows a day, unless you ask for more
 ASK_MIN = 5.0            # minutes; smaller unsure windows keep Synla's best guess instead of becoming a question
+FOLD_AFTER = 28         # days: a choice you have not used for this long moves under More
+SHOW_PROJECTS = 5       # projects shown as buttons; the rest are one search away
 GAP_MIN = 30.0           # minutes away from the computer inside your workday before Synla asks what it was
 LUNCH = (time(10, 30), time(13, 0), 45.0)   # away starting in this window and no longer than this: a break, not asked
 LIKE_BREAK = 30          # minutes: away starting this close to two earlier "Not work" answers is not asked either
@@ -194,6 +196,45 @@ class Synla:
 
     def today(self) -> date:
         return self.home or date.today()
+
+    # ---- the choices you see ---------------------------------------------------------------------------------
+    def usage(self) -> dict:
+        """What you picked yourself over the last four weeks, in minutes per project and per kind of work, and when
+        you first answered at all."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=FOLD_AFTER)
+        projects, kinds, first = defaultdict(float), defaultdict(float), None
+        rows = [(k, v.get("end"), v.get("project"), v.get("kind")) for k, v in self.store.decisions().items()]
+        rows += [(e["start"], e["end"], e["project"], e["kind"]) for e in self.store.manual()]
+        for start, end, project, kind in rows:
+            t = datetime.fromisoformat(start)
+            first = t if first is None or t < first else first
+            if t >= cutoff:
+                m = (datetime.fromisoformat(end) - t).total_seconds() / 60 if end else 1.0
+                projects[project] += m
+                kinds[kind] += m
+        return {"projects": projects, "kinds": kinds, "since": first}
+
+    def project_choices(self, guess: str = "") -> tuple:
+        """The projects shown as buttons: the five you used most lately, in your own list's order so the keys stay
+        put, plus Synla's guess if it is another one. The rest are under More."""
+        names, use = self.projects, self.usage()["projects"]
+        top = sorted((p for p in names if use.get(p)), key=lambda p: -use[p])[:SHOW_PROJECTS]
+        top += [p for p in names if p not in top][:SHOW_PROJECTS - len(top)]
+        shown = [p for p in names if p in top]
+        if guess in names and guess not in shown:
+            shown.append(guess)
+        return shown, sorted((p for p in names if p not in shown), key=str.lower)
+
+    def kind_choices(self, guess: str = "") -> tuple:
+        """The kinds of work shown as buttons: your role's, in its order. After four weeks, the ones you never use move
+        under More, except planned work and the unplanned kinds, which are what Synla measures."""
+        u = self.usage()
+        shown = list(roles.role(self.config)["kinds"])
+        if u["since"] and datetime.now(timezone.utc) - u["since"] >= timedelta(days=FOLD_AFTER):
+            shown = [k for k in shown if k == "project" or k in INVISIBLE or u["kinds"].get(k)]
+        if guess in KINDS and guess not in shown:
+            shown.append(guess)
+        return shown, [k for k in KINDS if k not in shown]
 
     def last_day(self) -> date:
         """The last day the pages let you go to: today, or the end of the demo week."""

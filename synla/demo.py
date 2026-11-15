@@ -11,6 +11,7 @@ DEMO_CONFIG = {
         "Monthly report": {"keywords": ["monthly", "kpi", "board"]},
         "Internal": {"keywords": ["timesheet", "expense", "intranet"]},
     },
+    "role": "specialist",
     "workday": {"start": "07:00", "end": "17:00"},
     "roundMinutes": 15,
     "keepDays": 90,

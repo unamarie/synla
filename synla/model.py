@@ -11,6 +11,8 @@ KINDS = {
     "firefighting": "Firefighting",
     "chasing":     "Chasing information",
     "datafixing": "Fixing other people's data",
+    "travel":      "Travel",
+    "people":      "People: 1:1s, hiring, development",
 }
 INVISIBLE = ("helping", "firefighting", "chasing", "datafixing")
 UNKNOWN = "?"
