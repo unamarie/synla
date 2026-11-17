@@ -10,9 +10,9 @@ from .blocks import _subtract, blocks, segments
 from .classify import ASK_BELOW, Classifier
 from .blocks import NOISE
 from .context import source_key
-from .model import INVISIBLE, KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment
-from .record import FORMAT, RecordBook
-from .source import ActivityWatch, Auto, JsonFile, SynlaRecorder, day_range
+from .model import INVISIBLE, KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment, reserved
+from .record import FORMAT, RecordBook, renamed
+from .source import AW_URL, ActivityWatch, Auto, JsonFile, SynlaRecorder, day_range, on_this_computer
 from .store import utc_key
 
 LEARN_MIN = 1.0          # minutes; a window you only glanced at is not learned from
@@ -64,9 +64,14 @@ def _cut(segs: list, holes: list) -> list:
             for s in segs for a, b in _subtract(s.start, s.end, holes) if (b - a).total_seconds() >= 1]
 
 
+class Problem(ValueError):
+    """Something Synla cannot do, said in words for you. The pages show the text as it is."""
+
+
 class Synla:
-    def __init__(self, store):
+    def __init__(self, store, notes: bool = True):
         self.store = store
+        self.notes = notes        # False in the recorder, so only the pages write what keeps coming back
         self.record = RecordBook(store)
         self.home = None          # the day the Today page shows; None is today (the demo sets its own week)
         self.last_undo = None     # token for taking back the latest change
@@ -79,13 +84,138 @@ class Synla:
         self.config = self.store.config()
         self.classifier = Classifier(self.config, self.store.memory(), self.store.hasher())
         src = self.config.get("source", "auto")
-        url = self.config.get("activityWatchUrl", "http://localhost:5600")
+        url = self.config.get("activityWatchUrl", AW_URL)
+        if not on_this_computer(url):
+            self.store.damaged["activityWatchUrl"] = ("activityWatchUrl in config.json points to another computer. "
+                                                      f"Synla only reads ActivityWatch on this computer, at {AW_URL}.")
+            url = AW_URL
         self.source = {"auto": lambda: Auto(self.store, url), "synla": lambda: SynlaRecorder(self.store),
                        "activitywatch": lambda: ActivityWatch(url)}.get(src, lambda: JsonFile(src))()
 
     @property
     def projects(self) -> list:
+        """Every project in your list, archived ones too, so their hours keep a name."""
         return list(self.config.get("projects", {}))
+
+    @property
+    def active(self) -> list:
+        """The projects Synla offers and guesses: your list without the archived ones."""
+        return [p for p, v in self.config.get("projects", {}).items() if not (isinstance(v, dict) and v.get("archived"))]
+
+    def named(self, project: str) -> str:
+        """A project's name today: a week sealed before a rename has the old name."""
+        return (self.config.get("renamed") or {}).get(project, project)
+
+    # ---- the first time --------------------------------------------------------------------------------------
+    def needs_setup(self) -> bool:
+        """The first time: only the starting project, no role, and setup not done. Someone who set Synla up by hand
+        in config.json is never sent there."""
+        c = self.config
+        return (not c.get("setupDone") and not c.get("role") and set(self.projects) <= {"Internal"}
+                and c.get("source", "auto") in ("auto", "synla", "activitywatch"))
+
+    def setup(self, role: str, projects: list, start: str, end: str, weekly: float, calls: bool):
+        """Saves the setup page: your role, projects with their words, your workday and the microphone check."""
+        if role not in roles.ROLES:
+            raise Problem("Pick the work that fits you best.")
+        if not projects:
+            raise Problem("Add at least one project.")
+        try:
+            if time.fromisoformat(start) >= time.fromisoformat(end):
+                raise Problem("The workday must end after it starts.")
+        except ValueError:
+            raise Problem("Write the times as hours and minutes, for example 08:00.") from None
+        if not 1 <= weekly <= 80:
+            raise Problem("A normal week is between 1 and 80 hours.")
+        c = self.store.config()
+        given = {}
+        used = {v.get("project") for v in self.store.decisions().values() if isinstance(v, dict)}
+        used |= {e.get("project") for e in self.store.manual() if isinstance(e, dict)}
+        for name, words in projects:
+            if reserved(name):
+                raise Problem("Synla uses that name itself. Pick another.")
+            if name.lower() in {p.lower() for p in given}:
+                raise Problem(f"{name} is in the list twice.")
+            old = c.get("projects", {}).get(name)
+            given[name] = {k: v for k, v in (old if isinstance(old, dict) else {}).items() if k != "archived"}
+            given[name]["keywords"] = words
+        for p, v in c.get("projects", {}).items():      # a project with hours is archived, never dropped
+            if p not in given and p in used:
+                given[p] = dict(v if isinstance(v, dict) else {}, archived=True)
+        c.update(role=role, projects=given, workday={"start": start, "end": end}, weeklyHours=weekly,
+                 detectCalls=bool(calls), setupDone=True)
+        self.store.save_config(c)
+        self.reload()
+
+    # ---- your projects ---------------------------------------------------------------------------------------
+    def save_projects(self, rows: list):
+        """The Projects page, in your order: name, words, code and archived for each. A new name for an existing
+        project is a rename: your answers, added time, what Synla learned and the log follow it. Sealed weeks keep
+        the name they had, and are not shown as changed because of it."""
+        c = self.store.config()
+        now = c.get("projects", {})
+        lower = {p.lower(): p for p in now}
+        out, renames, used = {}, {}, set()
+        for r in rows:
+            name, old = r["name"], r.get("old")
+            if not name:
+                raise Problem("Every project needs a name.")
+            if reserved(name):
+                raise Problem("Synla uses that name itself. Pick another.")
+            if name.lower() in used:
+                raise Problem(f"{name} is in the list twice.")
+            used.add(name.lower())
+            if old is not None and old not in now:
+                raise Problem("The list changed in the meantime. Reload the page and try again.")
+            other = lower.get(name.lower())
+            if other is not None and other != old:
+                raise Problem(f"There is already a project called {other}.")
+            entry = dict(now.get(old) or {}) if old is not None else {}
+            if not isinstance(entry, dict):
+                entry = {}
+            entry["keywords"] = r.get("words", [])
+            for k in ("code", "archived"):
+                if r.get(k):
+                    entry[k] = r[k]
+                else:
+                    entry.pop(k, None)
+            out[name] = entry
+            if old is not None and old != name:
+                renames[old] = name
+        out.update({p: v for p, v in now.items() if p not in out and p not in renames})
+        c["projects"] = out
+        if renames:
+            self._rename(renames)
+            c["renamed"] = renamed(c.get("renamed") or {}, renames)
+        for p in out:                              # a name in use again no longer stands for an old project
+            if p not in renames.values():
+                (c.get("renamed") or {}).pop(p, None)
+        self.store.save_config(c)
+        self.reload()
+
+    def _rename(self, renames: dict):
+        """Gives old names their new name in every file that holds a project name, the record book excepted."""
+        r = lambda p: renames.get(p, p)
+        dec = self.store.decisions()
+        for v in dec.values():
+            if isinstance(v, dict) and "project" in v:
+                v["project"] = r(v["project"])
+        manual = [dict(e, project=r(e.get("project"))) for e in self.store.manual()]
+        mem = self.store.memory()
+        for code, labels in (mem.get("project") or {}).items():
+            for old, new in renames.items():
+                if old in labels:
+                    labels[new] = labels.get(new, 0.0) + labels.pop(old)
+        log = self.store.corrections()
+        for e in log:
+            for k in ("guess", "answer", "was"):
+                if isinstance(e.get(k), list) and e[k]:
+                    e[k] = [r(e[k][0])] + e[k][1:]
+        self.store.save_decisions(dec)
+        self.store.save_manual(manual)
+        self.store.save_memory({k: v for k, v in mem.items() if k != "version"})
+        self.store.rewrite_log(log)
+        self._undo = self.last_undo = None      # an undo from before the rename would bring the old names back
 
     @property
     def source_name(self) -> str:
@@ -114,7 +244,7 @@ class Synla:
         """Unplanned work by source for this day, kept as one-way codes with kind and minutes. Window names are deleted
         after 14 days, but these codes let Synla see for as long as your answers are kept that the same failure keeps
         coming back. A code can't be turned back into the name."""
-        if not any(s.title != DELETED and s.app != MANUAL_APP for b in bl for s in b.segments):
+        if not self.notes or not any(s.title != DELETED and s.app != MANUAL_APP for b in bl for s in b.segments):
             return                                     # names deleted: keep what was noted while they were there
         day = {}
         for b in bl:
@@ -259,7 +389,7 @@ class Synla:
     def project_choices(self, guess: str = "") -> tuple:
         """The projects shown as buttons: the five you used most lately, in your own list's order so the keys stay
         put, plus Synla's guess if it is another one. The rest are under More."""
-        names, use = self.projects, self.usage()["projects"]
+        names, use = self.active, self.usage()["projects"]
         top = sorted((p for p in names if use.get(p)), key=lambda p: -use[p])[:SHOW_PROJECTS]
         top += [p for p in names if p not in top][:SHOW_PROJECTS - len(top)]
         shown = [p for p in names if p in top]
@@ -362,7 +492,7 @@ class Synla:
     def set_day_off(self, d: date, kind: str | None):
         """Vacation, sick, sick child or time off for a whole day; None takes it back. Only the kind is kept."""
         if kind and kind not in OFF:
-            raise ValueError("Pick vacation, sick, sick child or time off.")
+            raise Problem("Pick vacation, sick, sick child or time off.")
         snap = self._snapshot()
         state = self.store.day_state(d)
         if kind:
@@ -437,7 +567,7 @@ class Synla:
     def _open_gap(self, d: date, code: str) -> dict:
         g = next((g for g in self.gaps(d) if g["code"] == code), None)
         if not g:
-            raise ValueError("That time away has already been answered.")
+            raise Problem("That time away has already been answered.")
         return g
 
     def _away(self, d: date, g: dict, what: str):
@@ -534,8 +664,8 @@ class Synla:
 
     def undo(self, token: str):
         """Takes back the latest answer, approval or skip: your answers, what Synla learned from it, and the log."""
-        if not self._undo or not secrets.compare_digest(self._undo[0], token or ""):
-            raise ValueError("There is nothing to undo.")
+        if not self._undo or not secrets.compare_digest(self._undo[0].encode(), str(token or "").encode()):
+            raise Problem("There is nothing to undo.")
         snap = self._undo[1]
         self._undo = self.last_undo = None
         self.store.save_decisions(snap["decisions"])
@@ -593,11 +723,22 @@ class Synla:
         self._changed()
         return covered
 
-    def add_project(self, name: str, keywords: list | None = None):
+    def add_project(self, name: str, keywords: list | None = None) -> str:
+        """Adds a project, or brings back the one with that name (in any case) if you had it already. Returns its
+        name as it is in your list."""
         c = self.store.config()
-        c.setdefault("projects", {})[name] = {"keywords": keywords or []}
+        projects = c.setdefault("projects", {})
+        same = next((p for p in projects if p.lower() == name.lower()), None)
+        if same is not None:
+            if isinstance(projects[same], dict) and projects[same].pop("archived", None):
+                self.store.save_config(c)
+                self.reload()
+            return same
+        projects[name] = {"keywords": keywords or []}
+        (c.get("renamed") or {}).pop(name, None)
         self.store.save_config(c)
         self.reload()
+        return name
 
     # ---- time away from the computer -------------------------------------------------------------------------
     def add_time(self, d: date, start_hm: str, end_hm: str, project: str, kind: str, meeting: bool = False,
@@ -605,16 +746,19 @@ class Synla:
         """Time the computer could not see: a site visit, a meeting in person, a phone call. No notes are stored.
         The times are on the clock of that day, also when the day was spent abroad."""
         tz = tz or self.day_clock(d)
-        s, e = (_on_clock(d, time.fromisoformat(x), tz) for x in (start_hm, end_hm))
+        try:
+            s, e = (_on_clock(d, time.fromisoformat(x), tz) for x in (start_hm, end_hm))
+        except (TypeError, ValueError):
+            raise Problem("Write the times as hours and minutes, for example 13:30.") from None
         if e <= s:
-            raise ValueError("The end must be after the start.")
+            raise Problem("The end must be after the start.")
         if not project or kind not in KINDS:
-            raise ValueError("Pick both a project and a kind of work.")
+            raise Problem("Pick both a project and a kind of work.")
         entries = self.store.manual()
         for x in entries:
             xs, xe = datetime.fromisoformat(x["start"]), datetime.fromisoformat(x["end"])
             if s < xe and xs < e:
-                raise ValueError("This overlaps time you already added.")
+                raise Problem("This overlaps time you already added.")
         entries.append({"start": utc_key(s), "end": utc_key(e), "project": project, "kind": kind, "tz": _minutes(s)}
                        | ({"meeting": True} if meeting else {}))
         self.store.save_manual(entries)
@@ -667,9 +811,10 @@ class Synla:
         return any(s.title != DELETED for bl in self.week(monday).values() for b in bl for s in b.segments)
 
     def seal(self, monday: date, by: str = "you") -> dict:
+        monday -= timedelta(days=monday.weekday())        # a record is always for a whole week, Monday to Sunday
         st = self.statement(monday)
         if not st["days"]:
-            raise ValueError("There is nothing recorded this week.")
+            raise Problem("There is nothing recorded this week.")
         return self.record.seal(st, by)
 
     def week_status(self, monday: date) -> dict:
@@ -678,7 +823,7 @@ class Synla:
         live = self.has_window_names(monday)
         if not last:
             return {"state": "open", "seal": None, "live": live}
-        if live and self.record.changed(monday, self.statement(monday)):
+        if live and self.record.changed(monday, self.statement(monday), self.config.get("renamed")):
             return {"state": "changed", "seal": last, "live": live}
         return {"state": "sealed", "seal": last, "live": live}
 
@@ -694,8 +839,7 @@ class Synla:
             if monday + timedelta(days=6) > today - timedelta(days=AUTO_SEAL_AFTER) or monday.isoformat() in sealed:
                 continue
             st = self.statement(monday)
-            if st["days"]:
-                self.record.seal(st, by="auto")
+            if st["days"] and self.record.seal(st, by="auto", only_new=True):
                 done.append(monday)
         return done
 
@@ -760,14 +904,16 @@ class Synla:
     # ---- your data -------------------------------------------------------------------------------------------
     def forget_old(self):
         """Seal what is about to be lost, then delete what has passed its time."""
-        try:
-            self.auto_seal()
-        except Exception:
-            pass
-        self.store.forget(int(self.config.get("keepDays", 90)))
-        if (self.store.dir / "activity.db").exists():
-            recorder.prune(self.store, float(self.config.get("keepWindowDays", 14)))
-        self.record.prune(float(self.config.get("keepRecordYears", 5)))
+        steps = (("sealing old weeks", self.auto_seal),
+                 ("deleting old answers", lambda: self.store.forget(int(self.config.get("keepDays", 90)))),
+                 ("deleting old window names", lambda: (self.store.dir / "activity.db").exists() and
+                  recorder.prune(self.store, float(self.config.get("keepWindowDays", 14)))),
+                 ("deleting old records", lambda: self.record.prune(float(self.config.get("keepRecordYears", 5)))))
+        for what, step in steps:      # one step that fails must not stop the others, or Synla from starting
+            try:
+                step()
+            except Exception as e:
+                self.store.error(what, e)
         self._changed()
 
     def data_info(self) -> dict:
@@ -782,6 +928,7 @@ class Synla:
             "recorder_rows": rec.get("rows", 0),
             "recorder_first": rec.get("first"),
             "recorder_last": recorder.last_seen(self.store),
+            "recorder_alive": recorder.alive(self.store),
             "paused_until": self.store.paused_until(),
             "answers": len(dec),
             "answers_first": min((datetime.fromisoformat(k) for k in dec), default=None),

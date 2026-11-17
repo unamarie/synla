@@ -12,7 +12,9 @@
   python -m synla verify          check the record book; add a fingerprint or a downloaded record to check that
 """
 import argparse
+import hmac
 import json
+import secrets
 import sys
 import urllib.request
 import webbrowser
@@ -20,7 +22,7 @@ from datetime import date, timedelta
 
 from . import demo, record, report
 from .app import Synla
-from .server import csv_text, serve
+from .server import csv_text, proof, serve, with_key
 from .store import Store
 
 COMMANDS = ["review", "open", "record", "autostart", "remind", "pause", "resume", "week", "export", "demo", "seal",
@@ -63,11 +65,14 @@ def main(argv=None):
               "To run it in the background from sign-in: python -m synla autostart on")
         from . import notify
         if notify.reminder_time(store.config()):
-            recorder.register_reminder(True)      # so the end of day reminder can show and open Synla
+            recorder.register_reminder(True, store.other_dir())   # so the reminder can show and open Synla
         try:
             recorder.run(store)
         except KeyboardInterrupt:
             pass
+        except Exception as e:                 # started without a window: the reason goes to errors.log
+            store.error("starting the recorder", e)
+            raise
         return
 
     if a.command == "autostart":
@@ -75,7 +80,7 @@ def main(argv=None):
             sys.exit("Autostart is for Windows.")
         from . import recorder
         on = (a.value or "on").lower() != "off"
-        recorder.autostart(on)
+        recorder.autostart(on, store.other_dir())
         print("The recorder now starts when you sign in to Windows, with a reminder when Synla has questions."
               if on else "Autostart and the reminder are off.")
         return
@@ -84,7 +89,7 @@ def main(argv=None):
         if sys.platform != "win32":
             sys.exit("The reminder is a Windows notification.")
         from . import notify, recorder
-        recorder.register_reminder(True)
+        recorder.register_reminder(True, store.other_dir())
         ok = notify.show("2 quick questions about today", "This is how Synla's reminder looks. Click it to open Synla.",
                          wait=True)
         print("Shown." if ok else "Windows did not show it. Check that notifications are on for Synla in Settings.")
@@ -102,6 +107,8 @@ def main(argv=None):
     if a.command == "open":
         return open_page(store, a.port)
 
+    if a.command == "review":
+        print(f"Starting Synla, with its files in {store.dir}", flush=True)
     app = Synla(store)
     if a.command == "seal":
         d = a.date or (date.today() - timedelta(days=7))
@@ -123,14 +130,19 @@ def main(argv=None):
 
 
 def open_page(store, port):
-    """What the reminder opens: Synla's pages, reusing them if they already run. They stop after 30 idle minutes."""
+    """What the reminder opens: Synla's pages, reusing them if they already run. They stop after 30 idle minutes.
+    Before the key goes to a running copy, that copy must show it knows the key, so a program that took over the
+    port gets nothing."""
+    key = store.page_key()
     try:
-        p = json.loads((store.dir / "server.json").read_text(encoding="utf-8"))["port"]
+        p = int(json.loads((store.dir / "server.json").read_text(encoding="utf-8"))["port"])
+        n = secrets.token_hex(16)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        if opener.open(f"http://127.0.0.1:{p}/ping", timeout=2).read() == b"synla":
-            webbrowser.open(f"http://127.0.0.1:{p}/")
+        said = opener.open(f"http://127.0.0.1:{p}/ping?n={n}", timeout=2).read(200).decode("ascii", "replace")
+        if hmac.compare_digest(said.encode(), f"synla {proof(key, 'ping:' + n)}".encode()):
+            webbrowser.open(with_key(f"http://127.0.0.1:{p}/", key))
             return
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         pass
     app = Synla(store)
     app.forget_old()

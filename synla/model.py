@@ -16,6 +16,11 @@ KINDS = {
 }
 INVISIBLE = ("helping", "firefighting", "chasing", "datafixing")
 UNKNOWN = "?"
+RESERVED = (UNKNOWN, "Unsorted", "Not sorted")   # names Synla uses itself, so no project can have them
+
+
+def reserved(name: str) -> bool:
+    return name.strip().lower() in {r.lower() for r in RESERVED}
 MANUAL_APP = "Added by you"              # time away from the computer that you added yourself
 MANUAL_TITLE = "Away from the computer"
 

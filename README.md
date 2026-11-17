@@ -167,8 +167,10 @@ time. Turn the questions off on the **Your data** page.
   The record book keeps sealed weeks, with no window names, for 5 years.
 - The **Your data** page shows everything that is stored, and deletes all of it with one click.
 
-**Synla's pages are closed to other websites.** They only answer on 127.0.0.1 and only accept changes that carry a
-secret from Synla's own pages, so a web page you have open cannot read or change your data.
+**Synla's pages are locked to your browser.** They only answer on 127.0.0.1, open only with a key that Synla gives
+the browser it opens, run only Synla's own script, and accept changes only from Synla's own pages. A web page you have
+open, or another account on the computer, cannot read or change your data. If a file gets damaged, Synla uses the last
+good copy and says so. [docs/security.md](docs/security.md) lists every check.
 
 **What it changes on Windows.** Three entries under your own user in the registry, no admin rights: start the
 recorder at sign-in, the link `synla:open` that the reminder opens, and the name on the notification.
@@ -209,31 +211,24 @@ python -m synla demo
 
 ## Use it for real (Windows)
 
-1. Start the recorder: `python -m synla autostart on`. From now on it starts when you sign in to Windows, with no
-   window. To start it right away without signing out, run `python -m synla record` once.
-2. Open `%LOCALAPPDATA%\Synla\config.json` and add your projects with a few keywords each:
+1. Run `python -m synla`. The first time, Synla opens a short setup page in your browser: what it keeps, the work
+   that fits you, what you report hours on with a few words each, your workday, and whether calls count. **Save and
+   start recording** starts the recorder, and from then on it starts when you sign in to Windows, with no window.
+   No files to edit.
 
-   ```json
-   "projects": {
-     "Data platform": {"keywords": ["lakehouse", "pipeline"]},
-     "Gearbox G2": {"keywords": ["gearbox", "4500-"]},
-     "Internal": {"keywords": ["timesheet"]}
-   }
-   ```
+   ![Setup](docs/setup.png)
 
-   Keywords can be numbers: `"4500-"` matches every item number that starts with 4500, in ERP and PLM screens too.
-   The first time you open Synla, pick the role that fits your work. You can change it under **⋯ > Your role and
-   words**.
-
+2. Change your projects later under **⋯ > Your projects**: add, rename, archive, words and codes. Words can be
+   numbers: `4500-` matches every item number that starts with 4500, in ERP and PLM screens too.
 3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions, including
-   the ones about time away from the computer. To see what Synla sorted on its own, click **Check**. The first time,
-   Synla also asks whether to count calls from the microphone.
+   the ones about time away from the computer. To see what Synla sorted on its own, click **Check**. If the dot at
+   the top is red, click **Start**.
 4. On Friday, open **Week**: read the level for the week, then **Seal this week** and **Save a copy**. The timesheet
    is one click away; add your codes for Visma or another reporting system once, under **Codes**.
 
 | Command | What it does |
 |---|---|
-| `python -m synla` | Opens Synla's pages for today |
+| `python -m synla` | Opens Synla's pages for today, or the setup page the first time |
 | `python -m synla record` | Runs the recorder in this window (Windows) |
 | `python -m synla autostart on` | Starts the recorder at sign-in, with the reminder; `off` stops both |
 | `python -m synla remind` | Shows what the end of day reminder looks like |
@@ -264,7 +259,7 @@ python -m synla demo
    unclear glances join the block before. Then one spot check on a window of 10 minutes or more that Synla sorted on
    its own. Nothing on red days or days off.
 
-Run the tests with `python -m pytest`. They run on Linux and Windows on every push.
+Run the tests with `python -m pytest`. GitHub runs them on Linux on every push.
 
 ## Next
 

@@ -90,7 +90,7 @@ def maybe_remind(store, probe, config: dict, now: datetime, show=show) -> int | 
         return None
     store.save_reminded(now.date())                 # once a day, even if something below goes wrong
     from .app import Synla
-    n = len(Synla(store).questions(now.date())["items"])
+    n = len(Synla(store, notes=False).questions(now.date())["items"])
     if n:
         show(*words(n))
     return n

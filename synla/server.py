@@ -7,25 +7,32 @@ a secret token that only Synla's own pages know, sent as JSON (other sites canno
 The idea of the pages: Synla asks, you tap. It sorts what it is sure about on its own and asks about the few windows
 it is unsure of, one at a time, with its best guess already picked. Everything else is one click away.
 """
+import base64
 import csv
+import hashlib
+import hmac
 import io
 import json
+import math
 import os
 import re
 import secrets
+import socket
+import socketserver
 import sys
 import threading
 import time as clock
 from datetime import date, datetime, time, timedelta, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import record, recorder, report, roles, workload
 from .classify import ASK_BELOW
 from .context import d365, outlook_item, strip_app
-from .app import OFF
-from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN
+from .app import OFF, Problem
+from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN, reserved
+from .store import write_whole
 
 KEYS = "qwertyui"                         # keys for the kinds of work you see, in order
 COUNT = {1: "One quick question", 2: "Two quick questions", 3: "Three quick questions", 4: "Four quick questions",
@@ -39,6 +46,7 @@ APPS = {"excel.exe": "Excel", "winword.exe": "Word", "powerpnt.exe": "PowerPoint
 PALETTE = 8      # a Norwegian beach: sea glass, driftwood, heather, marram grass, sea pinks, lichen, fjord, rose hips
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 NOT_SORTED = "Not sorted"
+WINDOWS = sys.platform == "win32"        # Synla's own recorder, autostart and the microphone check are for Windows
 
 CSS = """
 :root{--paper:#f3f4ef;--surface:#fff;--ink:#1f2b26;--muted:#5d665f;--line:#e1e4dc;--track:#e8eae3;--sea:#0b746c;
@@ -191,11 +199,24 @@ h2{font-size:1.05rem;margin:26px 0 8px}
 .field{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.field input{min-width:260px}
 ul.plain{margin:6px 0;padding-left:20px}ul.plain li{margin:4px 0}
 .good{color:var(--green);font-weight:700}.bad{color:var(--red);font-weight:700}
+.steps{list-style:none;margin:0;padding:0;counter-reset:step}.steps>li{counter-increment:step}
+.steps h3{justify-content:flex-start}.steps h3::before{content:counter(step);display:inline-grid;place-items:center;width:26px;
+ height:26px;border-radius:50%;border:1.5px solid var(--line);color:var(--muted);font-size:.85rem;font-weight:700;flex:none}
+.prows{display:grid;gap:8px;margin-top:12px}
+.prow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) 72px;gap:8px;align-items:center}
+.prow.withcode{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) 110px 88px}
+.prow input{font:inherit;width:100%;min-width:0;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.prow.head{font-size:.85rem;color:var(--muted)}.prow button{justify-self:start}
+.prow[data-archived] input{color:var(--muted);background:var(--paper)}.prow[data-archived] .pname{text-decoration:line-through}
+.field input[type=time]{min-width:0;width:8.5em}.field input[type=number]{min-width:0;width:6em}.chips.calls .chip{padding:6px 18px}
+.choice{display:flex;align-items:center;gap:9px;margin-top:12px;cursor:pointer}.choice input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
 .offscreen{position:absolute;left:-9999px;width:1px;height:1px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:var(--ink);color:var(--paper);
  border-radius:12px;padding:11px 16px;display:flex;gap:16px;align-items:center;box-shadow:0 12px 32px #00000040;transition:.2s;z-index:30;max-width:92vw}
 #toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}#toast button{background:none;border:0;color:var(--toastlink);font-weight:700;cursor:pointer}
-@media (max-width:720px){.top .in{gap:8px;padding:10px 12px}nav a{padding:6px 7px;font-size:.92rem}.brand{font-size:1rem}.rec span{display:none}main{padding:20px 14px 80px}
+@media (max-width:720px){.prow,.prow.withcode{grid-template-columns:1fr}.prow.head{display:none}
+ .prow{padding-bottom:10px;border-bottom:1px solid var(--line)}
+ .top .in{gap:8px;padding:10px 12px}nav a{padding:6px 7px;font-size:.92rem}.brand{font-size:1rem}.rec span{display:none}main{padding:20px 14px 80px}
  .row{grid-template-columns:1fr;gap:6px}.lab{padding-top:0}.hint{margin-left:0}.ask{padding:18px 16px}.two{grid-template-columns:1fr}
  .crow{grid-template-columns:1fr auto}.crow .t,.crow .by{display:none}.crow .pj{grid-column:1}.weekgrid{gap:6px}.stack{width:80%;height:160px}
  .kname{grid-template-columns:1fr;gap:4px}.sealed{flex-wrap:wrap}.sealed > div{flex-basis:calc(100% - 50px)}.sealed .save{width:100%;justify-content:center}td.lim{white-space:normal}
@@ -266,13 +287,14 @@ async function skip(card){
  const res=await post('/api/skip',{date:card.dataset.date,code:card.dataset.code});
  if(res){await refresh();toast(card.dataset.type==='offday'?'OK, not a day off.':"Skipped. It keeps Synla's best guess.",res.undo)}
 }
-const NEWP="<button type='button' class='chip ghost' data-newproject>+ New "+WORD+"</button>";
+function newButton(){const b=document.createElement('button');b.type='button';b.className='chip ghost';b.dataset.newproject='';
+ b.textContent='+ New '+WORD;return b}
 function newProject(btn){
  const wrap=btn.closest('.newp');
- wrap.innerHTML="<input type='text' maxlength='60' placeholder='Name, then Enter' aria-label='New "+WORD+" name'>";
- const input=$('input',wrap);input.focus();
+ const input=document.createElement('input');input.type='text';input.maxLength=60;input.placeholder='Name, then Enter';
+ input.setAttribute('aria-label','New '+WORD+' name');wrap.replaceChildren(input);input.focus();
  input.addEventListener('keydown',async e=>{
-  if(e.key==='Escape'){wrap.innerHTML=NEWP;return}
+  if(e.key==='Escape'){wrap.replaceChildren(newButton());return}
   if(e.key!=='Enter')return;
   e.preventDefault();const name=input.value.trim();if(!name)return;
   const res=await post('/api/project',{name});if(!res)return;
@@ -282,13 +304,13 @@ function newProject(btn){
    const sw=document.createElement('i');sw.className='sw';sw.style.background=res.color;c.append(sw,document.createTextNode(res.name));
    g.insertBefore(c,g.querySelector(':scope > .more, :scope > .newp, :scope > [data-showmore]'));
   });
-  const box=wrap.closest('.ask,.away');wrap.innerHTML=NEWP;choose(box,'.chips.p',res.name);
+  const box=wrap.closest('.ask,.away');wrap.replaceChildren(newButton());choose(box,'.chips.p',res.name);
  });
 }
 function change(row){
  const ed=$('#editor');row.after(ed);ed.hidden=false;ed.dataset.ids=row.dataset.ids;ed.dataset.how='block';
  choose(ed,'.chips.p',row.dataset.project);choose(ed,'.chips.k',row.dataset.kind);
- const scope=$('.scope',ed);scope.innerHTML='';
+ const scope=$('.scope',ed);scope.replaceChildren();
  const wins=JSON.parse(row.dataset.windows||'[]');
  const add=(text,ids,how,on)=>{const l=document.createElement('label'),r=document.createElement('input');r.type='radio';r.name='scope';r.checked=on;
   r.addEventListener('change',()=>{ed.dataset.ids=ids;ed.dataset.how=how});l.append(r,document.createTextNode(' '+text));scope.append(l)};
@@ -301,6 +323,14 @@ async function addTime(box){
  const res=await post('/api/time',{date:box.dataset.date,start:from,end:to,project:p.dataset.v,kind:k?k.dataset.v:'',
   meeting:$('.meeting',box).checked});
  if(res){await refresh();toast('Added '+from+' to '+to+'.','time:'+res.id)}
+}
+function rows(){return $$('.prow[data-row]').map(r=>({old:r.hasAttribute('data-old')?r.dataset.old:null,
+ name:$('.pname',r).value,words:$('.pwords',r).value,code:r.querySelector('.prcode')?r.querySelector('.prcode').value:'',
+ archived:r.hasAttribute('data-archived')}))}
+let starting=false;
+async function startRecording(){
+ if(starting)return;starting=true;toast('Starting the recorder.');
+ const r=await post('/api/record',{});starting=false;if(r){await refresh();toast('Recording.')}
 }
 document.addEventListener('click',async e=>{
  const on=q=>e.target.closest(q);let b;
@@ -338,6 +368,21 @@ document.addEventListener('click',async e=>{
  if(b=on('[data-gaps]')){if(await post('/api/settings',{askAboutGaps:b.dataset.gaps==='1'})){await refresh();toast(b.dataset.gaps==='1'?'Synla asks about time away again.':'No more questions about time away.')}return}
  if(b=on('[data-delete]')){if(confirm(b.dataset.confirm)&&await post('/api/delete',{what:b.dataset.delete})){await refresh();toast('Deleted.')}return}
  if(b=on('[data-print]')){window.print();return}
+ if(b=on('[data-pickrole]')){$$('[data-pickrole]').forEach(x=>x.classList.toggle('on',x===b));return}
+ if(b=on('[data-addrow]')){const row=$('#newrow').content.firstElementChild.cloneNode(true);$('#prows').append(row);$('.pname',row).focus();return}
+ if(b=on('[data-removerow]')){b.closest('.prow').remove();return}
+ if(b=on('[data-archive]')){const r=b.closest('.prow'),a=!r.hasAttribute('data-archived');r.toggleAttribute('data-archived',a);
+  b.textContent=a?'Bring back':'Archive';return}
+ if(b=on('[data-saveprojects]')){if(await post('/api/projects',{projects:rows()})){await refresh();toast('Saved.')}return}
+ if(b=on('[data-startrec]')){startRecording();return}
+ if(b=on('[data-autostart]')){const v=b.dataset.autostart==='1';if(await post('/api/autostart',{on:v})){await refresh();
+  toast(v?'Synla starts when you sign in.':'Synla no longer starts when you sign in.')}return}
+ if(b=on('[data-setup]')){const role=$('[data-pickrole].on'),calls=$('.chips.calls .chip.on'),auto=$('#autostart');
+  b.disabled=true;toast(auto?'Saving and starting the recorder.':'Saving.');
+  const r=await post('/api/setup',{role:role?role.dataset.pickrole:'',projects:rows(),start:$('#daystart').value,
+   end:$('#dayend').value,weekly:$('#weekly').value,calls:calls?calls.dataset.v==='1':false,
+   record:!!auto,autostart:auto?auto.checked:false});
+  b.disabled=false;if(r)location.href='/';return}
 });
 document.addEventListener('input',e=>{
  if(!e.target.matches('.find'))return;const q=e.target.value.trim().toLowerCase();
@@ -363,7 +408,9 @@ document.addEventListener('keydown',e=>{
 });
 """
 
-CSP = ("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+# Only Synla's own script runs: the browser checks its fingerprint, so a window name that looks like code stays text.
+CSP = (f"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-"
+       f"{base64.b64encode(hashlib.sha256(JS.encode('utf-8')).digest()).decode()}'; connect-src 'self'; img-src 'self' data:; "
        "form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -523,6 +570,9 @@ def why(g) -> str:
 
 # ---- the page around every page ---------------------------------------------------------------------------------------
 def recording(app) -> bool:
+    """A recorder works for this folder (also while you are away from the computer), or ActivityWatch is read."""
+    if recorder.alive(app.store):
+        return True
     last = recorder.last_seen(app.store)
     return bool(last and datetime.now(timezone.utc) - last < timedelta(minutes=2)) or app.source_name == "ActivityWatch"
 
@@ -535,11 +585,15 @@ def status(app) -> str:
     if app.config.get("source", "auto") not in ("auto", "synla", "activitywatch"):
         return "<span class='rec'><i></i><span>Made-up week</span></span>"
     last = recorder.last_seen(app.store)
-    if last and datetime.now(timezone.utc) - last < timedelta(minutes=2):
+    if recorder.alive(app.store) or last and datetime.now(timezone.utc) - last < timedelta(minutes=2):
         return "<span class='rec on'><i></i><span>Recording</span></span>"
     if app.source_name == "ActivityWatch":
         return "<span class='rec on'><i></i><span>Reading ActivityWatch</span></span>"
-    return ("<span class='rec none' title='Start it with: python -m synla record'><i></i><span>Not recording</span></span>")
+    if WINDOWS:
+        return ("<span class='rec none'><i></i><span>Not recording</span>"
+                "<button class='link' data-startrec>Start</button></span>")
+    return ("<span class='rec none' title='On Mac and Linux, Synla reads ActivityWatch while it runs'><i></i>"
+            "<span>Not recording</span></span>")
 
 
 def menu(app) -> str:
@@ -548,6 +602,7 @@ def menu(app) -> str:
     else:
         pause = "<button data-pause='60'>Pause for 1 hour</button><button data-pause='rest'>Pause until tomorrow</button>"
     return (f"<details class='menu' id='menu'><summary aria-label='More'>⋯</summary><div class='pop'>{pause}<hr>"
+            f"<a href='/projects'>Your {escape(roles.word(app.config, plural=True).lower())}</a>"
             f"<a href='/week/timesheet'>Timesheet</a><a href='/year'>Year report</a><a href='/role'>Your role and words</a>"
             f"<a href='/data'>Your data</a></div></details>")
 
@@ -559,8 +614,17 @@ def page(app, title: str, body: str, token: str, here: str = "") -> str:
             f"<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='synla-token' content='{escape(token)}'><meta name='synla-word' content='{escape(roles.word(app.config).lower())}'>"
             f"<title>{escape(title)} · Synla</title><style>{CSS}</style></head><body>"
             f"<header class='top'><div class='in'><a class='brand' href='/'>Synla</a><nav>{nav}</nav>{status(app)}{menu(app)}</div></header>"
-            f"<main>{body}</main><div id='toast' role='status' aria-live='polite'><span class='msg'></span>"
+            f"<main>{damaged(app)}{body}</main><div id='toast' role='status' aria-live='polite'><span class='msg'></span>"
             f"<button type='button' hidden>Undo</button></div><script>{JS}</script></body></html>")
+
+
+def damaged(app) -> str:
+    """A file Synla could not read, said plainly at the top of every page until the file is good again."""
+    msgs = list(app.store.damaged.values())
+    if not msgs:
+        return ""
+    return ("<section class='panel sealed'><span class='ok warn'>!</span><div><b>A file needs a look</b>"
+            + "".join(f"<div class='note'>{escape(m)}</div>" for m in msgs) + "</div></section>")
 
 
 # ---- today -----------------------------------------------------------------------------------------------------------
@@ -701,9 +765,10 @@ def done_card(app, d: date, q: dict, nums: dict, bl: list) -> str:
             text = (f"The details for this day have been deleted. <a href='/week?date={monday}'>The record book has this "
                     f"week.</a>")
         elif d == date.today():
-            text = ("Synla shows your day here as it goes. "
-                    + ("" if recording(app) else "Start recording with <b>python -m synla record</b>, or let it start "
-                       "with Windows: <b>python -m synla autostart on</b>."))
+            text = "Synla shows your day here as it goes."
+            if not recording(app):
+                text += (" <div class='act'><button class='save' data-startrec>Start recording</button></div>" if WINDOWS
+                         else " On this computer Synla reads ActivityWatch while it runs.")
         else:
             text = "Nothing was recorded this day."
         return f"<section class='done'><span class='ok open'></span><div><b>Nothing recorded{' yet' if d == date.today() else ''}.</b><p>{text}</p></div></section>"
@@ -766,7 +831,7 @@ kept, no notes.</p>
 def mic_card(app) -> str:
     """Asked once, on a computer where Synla's own recorder runs: count calls from the microphone or not."""
     if "detectCalls" in app.config or app.config.get("source", "auto") not in ("auto", "synla") or \
-            (sys.platform != "win32" and app.config.get("source") != "synla"):
+            (not WINDOWS and app.config.get("source") != "synla"):
         return ""
     return ("<section class='panel rolepick'><b>Count calls from the microphone?</b> <span class='note'>When Teams, Zoom, "
             "Webex, Slack or Skype is using the microphone, Synla counts the time as a meeting, also when another window "
@@ -850,6 +915,85 @@ def today_page(app, d: date, token: str) -> str:
     body = (role_card(app) + mic_card(app) + head + (timeline(app, d, bl, asked) if bl else "") + card + quiet
             + (check_section(app, d, bl) if bl else "") + away_section(app, d) + dayoff_section(app, d))
     return page(app, "Today" if d == app.today() else day_title(d), body, token, "today" if d == app.today() else "")
+
+
+# ---- the first time ---------------------------------------------------------------------------------------------------
+def project_rows(rows: list, codes: bool = False) -> str:
+    """Rows of name, words and (on the Projects page) code. Existing projects carry their name as it was, so a new
+    name is a rename."""
+    out = []
+    for name, v in rows:
+        v = v if isinstance(v, dict) else {}
+        words = ", ".join(str(k) for k in v.get("keywords", []))
+        old = f" data-old='{escape(name, quote=True)}'" if name is not None else ""
+        arch = " data-archived" if v.get("archived") else ""
+        code = (f"<input class='prcode' aria-label='Code' maxlength='20' placeholder='Code' "
+                f"value='{escape(str(v.get('code', '')), quote=True)}'>") if codes else ""
+        button = (f"<button type='button' class='link' data-archive>{'Bring back' if arch else 'Archive'}</button>"
+                  if codes and name is not None else "<button type='button' class='link' data-removerow>Remove</button>")
+        out.append(f"<div class='prow{' withcode' if codes else ''}' data-row{old}{arch}>"
+                   f"<input class='pname' aria-label='Name' maxlength='60' placeholder='Name' value='{escape(name or '', quote=True)}'>"
+                   f"<input class='pwords' aria-label='Words in window titles' maxlength='600' "
+                   f"placeholder='Words, for example budget, forecast' value='{escape(words, quote=True)}'>{code}{button}</div>")
+    return "".join(out)
+
+
+def setup_page(app, token: str) -> str:
+    current = app.config.get("role") or roles.DEFAULT
+    cards = "".join(
+        f"<button type='button' class='rolecard{' on' if k == current else ''}' data-pickrole='{k}'><b>{escape(r['name'])}</b>"
+        f"<small>{escape(r['word'][1])}. " + escape(", ".join(roles.say({'role': k}, x) for x in r["kinds"][:4])) + "</small></button>"
+        for k, r in roles.ROLES.items())
+    rows = project_rows([(p, v) for p, v in app.config.get("projects", {}).items()] + [(None, {})] * 2)
+    start, end = app.workday
+    weekly = app.config.get("weeklyHours", 37.5)
+    calls = ("<li class='panel'><h3>Calls</h3><p>Count a call as a meeting, also when another window is in front?</p>"
+             "<p class='note'>Synla then asks Windows whether Teams, Zoom, Webex, Slack or Skype is using the microphone, the "
+             "same as the microphone icon in the taskbar. It never listens.</p><div class='chips calls'>"
+             "<button type='button' class='chip' data-v='1' aria-pressed='false'>Yes</button>"
+             "<button type='button' class='chip on' data-v='0' aria-pressed='true'>No</button></div></li>") if WINDOWS else ""
+    go = ("<label class='choice'><input type='checkbox' id='autostart' checked> Start recording when I sign in to Windows</label>"
+          "<div class='act'><button class='save' data-setup>Save and start recording</button></div>") if WINDOWS else \
+        ("<p class='note'>On this computer Synla reads ActivityWatch while it runs.</p>"
+         "<div class='act'><button class='save' data-setup>Save</button></div>")
+    body = f"""<h1>Welcome to Synla</h1><p class='sub'>Synla notes which window is in front, so your timesheet almost fills
+itself in. Everything stays on this computer, and only you can see it.</p>
+<section class='panel'><h3>What Synla keeps</h3><ul class='plain'>
+<li>The program and the title of the window in front, and when. Never keystrokes, screenshots, sound or web addresses.</li>
+<li>Names of people in chats, and email addresses, are hidden before anything is stored.</li>
+<li>Window titles are deleted after 14 days. Your hours stay.</li>
+<li>You can pause, or delete everything, at any time.</li></ul></section>
+<ol class='steps'>
+<li class='panel'><h3>Your work</h3><p class='note'>Pick what fits best. It decides the words and the choices you see.</p>
+<div class='roles'>{cards}</div></li>
+<li class='panel'><h3>What you report hours on</h3><p class='note'>One line for each project, customer or area. Add a few
+words you see in window titles when you work on it, such as a customer, a system or a file name. Synla learns the rest
+from your answers.</p><div class='prows' id='prows'><div class='prow head'><span>Name</span><span>Words in window titles,
+with commas between</span><span></span></div>{rows}</div><div class='buttons'><button type='button' class='btn' data-addrow>Add a line</button></div>
+<template id='newrow'>{project_rows([(None, {})])}</template></li>
+<li class='panel'><h3>Your day</h3><div class='field'>Work usually starts <input type='time' id='daystart' value='{escape(start, quote=True)}'>
+and ends <input type='time' id='dayend' value='{escape(end, quote=True)}'></div>
+<div class='field'>A normal week is <input type='number' id='weekly' min='1' max='80' step='0.5' value='{weekly:g}'> hours</div>
+<p class='note'>Synla only asks about time away from the computer inside your workday.</p></li>
+{calls}</ol>
+<section class='panel'>{go}<p class='note'>You can change all of this later, under ⋯.</p></section>"""
+    return page(app, "Welcome", body, token)
+
+
+def projects_page(app, token: str) -> str:
+    many, one = roles.word(app.config, plural=True), roles.word(app.config).lower()
+    items = list(app.config.get("projects", {}).items())
+    items.sort(key=lambda kv: bool(isinstance(kv[1], dict) and kv[1].get("archived")))     # archived last
+    body = f"""<h1>Your {escape(many.lower())}</h1><p class='sub'>What you report hours on, the words in window titles that
+point Synla to each {escape(one)}, and your code in the reporting system.</p>
+<section class='panel'><div class='prows' id='prows'><div class='prow withcode head'><span>Name</span><span>Words in window
+titles, with commas between</span><span>Code</span><span></span></div>{project_rows(items, codes=True)}</div>
+<template id='newrow'>{project_rows([(None, {})], codes=True)}</template>
+<div class='foot'><button type='button' class='btn' data-addrow>Add a {escape(one)}</button>
+<button type='button' class='save' data-saveprojects>Save</button></div></section>
+<p class='note'>A new name changes the name in your answers and timesheets too. Sealed weeks in the record book keep the
+name they had. An archived {escape(one)} keeps its hours, but Synla no longer offers or guesses it.</p>"""
+    return page(app, f"Your {many.lower()}", body, token)
 
 
 # ---- a week ----------------------------------------------------------------------------------------------------------
@@ -1044,14 +1188,15 @@ def timesheet_rows(app, monday: date) -> dict:
     for x in seal["data"]["days"]:
         mins = {}
         for r in x["stretches"]:
-            mins[r["project"]] = mins.get(r["project"], 0.0) + r["minutes"]
+            p = app.named(r["project"])
+            mins[p] = mins.get(p, 0.0) + r["minutes"]
         out[date.fromisoformat(x["date"])] = {p: round(m / step) * step / 60 for p, m in sorted(mins.items())
                                               if round(m / step) > 0}
     return out
 
 
 def project_code(app, p: str) -> str:
-    v = app.config.get("projects", {}).get(p)
+    v = app.config.get("projects", {}).get(app.named(p))
     return str(v.get("code", "")) if isinstance(v, dict) else ""
 
 
@@ -1077,19 +1222,19 @@ def timesheet_page(app, d: date, token: str) -> str:
     lines = report_lines(app, monday)
     days = sorted({x["date"] for x in lines})
     keys = list(dict.fromkeys((x["code"], x["what"], x["off"]) for x in sorted(lines, key=lambda x: (x["off"], x["what"]))))
-    cell = {(x["code"], x["what"], x["off"], x["date"]): x["hours"] for x in lines}
+    hrs = {(x["code"], x["what"], x["off"], x["date"]): x["hours"] for x in lines}
     head = "".join(f"<th class='num'>{day:%a %d}</th>" for day in days)
     rows = "".join(f"<tr{' class=off' if off else ''}><td class='code'>{escape(code)}</td><td>{escape(what)}</td>"
-                   + "".join(f"<td class='num'>{cell[(code, what, off, day)]:g}</td>" if cell.get((code, what, off, day))
+                   + "".join(f"<td class='num'>{hrs[(code, what, off, day)]:g}</td>" if hrs.get((code, what, off, day))
                              else "<td></td>" for day in days)
-                   + f"<td class='num'><b>{sum(cell.get((code, what, off, day), 0) for day in days):g}</b></td></tr>"
+                   + f"<td class='num'><b>{sum(hrs.get((code, what, off, day), 0) for day in days):g}</b></td></tr>"
                    for code, what, off in keys)
     totals = ("<tr class='total'><td></td><td>Total</td>" + "".join(
         f"<td class='num'>{sum(x['hours'] for x in lines if x['date'] == day):g}</td>" for day in days)
         + f"<td class='num'>{sum(x['hours'] for x in lines):g}</td></tr>") if lines else ""
     tsv = "\n".join(["Code\tWhat\t" + "\t".join(f"{day:%a %d.%m}" for day in days) + "\tTotal"] +
-                    [f"{code}\t{what}\t" + "\t".join(f"{cell.get((code, what, off, day), 0):g}" for day in days)
-                     + f"\t{sum(cell.get((code, what, off, day), 0) for day in days):g}" for code, what, off in keys])
+                    [f"{cell(code)}\t{cell(what)}\t" + "\t".join(f"{hrs.get((code, what, off, day), 0):g}" for day in days)
+                     + f"\t{sum(hrs.get((code, what, off, day), 0) for day in days):g}" for code, what, off in keys])
     table = (f"<section class='panel'><table><tr><th>Code</th><th>{roles.word(app.config)}</th>{head}"
              f"<th class='num'>Total</th></tr>{rows}{totals}</table></section>"
              if lines else "<section class='done'><span class='ok open'></span><div><b>Nothing recorded this week.</b></div></section>")
@@ -1278,7 +1423,9 @@ def year_csv(app, y: int) -> str:
 
 
 def statement_file(app, seq: int) -> tuple[str, str]:
-    s = next(x for x in app.record.seals() if x["seq"] == seq)
+    s = next((x for x in app.record.seals() if x["seq"] == seq), None)
+    if s is None:
+        raise Problem("That record is not in the record book.")
     doc = {"fingerprint": s["fingerprint"], "previous": s["prev"], "record": s["data"],
            "howToCheck": "SHA-256 of previous + record written as JSON with sorted keys and no spaces equals fingerprint."}
     return f"synla-week-{s['week']}-v{s['version']}.json", json.dumps(doc, ensure_ascii=False, indent=1)
@@ -1289,16 +1436,24 @@ def data_page(app, token: str) -> str:
     i = app.data_info()
     p = i["privacy"]
     recording = ("paused until " + i["paused_until"].astimezone().strftime("%H:%M")) if i["paused_until"] else \
-        ("on" if i["recorder_last"] and datetime.now(timezone.utc) - i["recorder_last"] < timedelta(minutes=2) else "not running")
+        ("on" if i["recorder_alive"] or i["recorder_last"] and datetime.now(timezone.utc) - i["recorder_last"] <
+         timedelta(minutes=2) else "not running")
     aw_note = ("<p class='note'>ActivityWatch keeps its own history, separate from Synla. Synla can't delete it; "
                "you can, in ActivityWatch.</p>") if i["source"] in ("auto", "activitywatch") else ""
+    start, signin = "", ""
+    if WINDOWS:
+        if recording == "not running":
+            start = "<button class='btn' data-startrec>Start recording</button>"
+        on = recorder.autostart_on(app.store.other_dir())
+        signin = (f"<p class='note'>Starts when you sign in to Windows: {'yes' if on else 'no'}. "
+                  f"<button class='link' data-autostart='{0 if on else 1}'>{'Turn off' if on else 'Turn on'}</button></p>")
     body = f"""<h1>Your data</h1><p class='sub'>What Synla keeps, where, for how long, and how to delete it.</p>
 <section class='panel'><h3>Where</h3><div class='fp'>{escape(i['folder'])}</div>
 <p class='note'>Only on this computer. Nothing is sent anywhere, and there is no account, server or admin.
 {'Window names are encrypted with your Windows login.' if i['encrypted'] else 'Only your account can open the folder.'}</p></section>
-<section class='panel'><h3>Recording: {recording}</h3><div class='buttons'><button class='btn' data-pause='60'>Pause 1 hour</button>
+<section class='panel'><h3>Recording: {recording}</h3><div class='buttons'>{start}<button class='btn' data-pause='60'>Pause 1 hour</button>
 <button class='btn' data-pause='rest'>Pause until tomorrow</button><button class='btn' data-pause='0'>Resume</button></div>
-</section>
+{signin}</section>
 <section class='panel'><h3>Microphone check for calls: {'on' if i['detectCalls'] else 'off'}</h3><p class='note'>When it is
 on, Synla asks Windows whether Teams, Zoom, Webex, Slack or Skype is using the microphone, the same as the microphone icon
 in the taskbar, so a call counts as a meeting even when another window is in front. It never touches the microphone or
@@ -1331,7 +1486,8 @@ Change the list in config.json.</li></ul></section>
 <button class='btn' data-delete='windows' data-confirm='Delete all window names now? Your answers, timesheets and record book stay.'>Delete all window names</button>
 <button class='btn' data-delete='all' data-confirm='Delete window names, answers, added time, the log and learned clues? Your record book stays. This cannot be undone.'>Delete everything except the record book</button>
 <button class='btn' data-delete='record' data-confirm='Delete the record book with all sealed weeks? Emails you sent yourself are not affected. This cannot be undone.'>Delete the record book</button></div>
-<p class='note'>Deleting is final. Your settings (projects and keywords) stay.</p></section>
+<p class='note'>Deleting is final. Your settings (projects and keywords) stay. The recorder keeps recording from now
+on: pause it first if you want a break.</p></section>
 <section class='panel'><h3>Built for you, not for monitoring</h3><ul class='plain'>
 <li>No account, server or admin mode, and no way to collect or compare data from several people.</li>
 <li>Nothing leaves this computer unless you copy it out yourself, for example the weekly summary.</li>
@@ -1351,218 +1507,503 @@ def csv_text(app, d: date, excel: bool = False) -> str:
     wr.writerow(["date", "code", "project", "hours"])
     for x in report_lines(app, monday_of(d)):
         h = f"{x['hours']:g}"
-        wr.writerow([x["date"].isoformat(), x["code"], x["what"], h.replace(".", ",") if excel else h])
+        wr.writerow([x["date"].isoformat(), cell(x["code"]), cell(x["what"]), h.replace(".", ",") if excel else h])
     return ("\ufeff" if excel else "") + f.getvalue()
 
 
 # ---- the server ------------------------------------------------------------------------------------------------------
-def make_handler(app, token: str, port: int, seen: list | None = None):
+BODY_MAX = 1_000_000            # bytes; what a page sends is a few kilobytes
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+CODE = re.compile(r"^[\w:.+\-]{1,80}$")
+TEXT = "text/plain; charset=utf-8"
+HOST_ONLY = "Synla only answers on 127.0.0.1 or localhost."
+OOPS = "Something went wrong in Synla. It is noted in errors.log in Synla's folder."
+LOCKED = """<!doctype html><html lang='en'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>Open Synla again · Synla</title>
+<style>:root{color-scheme:light dark}body{font:17px/1.55 system-ui,sans-serif;max-width:34em;margin:14vh auto;padding:0 16px;
+color:#1f2b26;background:#f3f4ef}@media (prefers-color-scheme:dark){body{color:#ece8de;background:#171a18}}</style></head>
+<body><h1>Open Synla again</h1><p>For your privacy, Synla's pages only open from Synla itself, in the browser it opened
+them in. Open Synla from the link in its reminder, or run <code>python -m synla</code>, and this page opens.</p></body></html>"""
+
+
+def proof(key: str, text: str) -> str:
+    """Shows that whoever answers knows the key, without giving the key away."""
+    return hmac.new(key.encode("ascii"), text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def cookie_name(key: str) -> str:
+    """The cookie that holds the key. Its name follows from the key, so the demo and your own Synla, each with its
+    own folder and key, never overwrite each other's, whichever port they run on."""
+    return "synla" + proof(key, "cookie name")[:10]
+
+
+def same(a, b: str) -> bool:
+    """Compares secrets in constant time."""
+    return isinstance(a, str) and secrets.compare_digest(a.encode("utf-8", "replace"), b.encode("utf-8"))
+
+
+def clean(v, limit: int) -> str:
+    """Text from a page, safe to keep and show: no control or text direction characters, single spaces, not too long."""
+    if v is None:
+        return ""
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        raise Problem("Something in the request was not text.")
+    return " ".join(CONTROL.sub(" ", str(v)).split())[:limit]
+
+
+def cell(v) -> str:
+    """A text cell for CSV and copied tables: on one line, and shown as text by Excel, never run as a formula."""
+    s = " ".join(str(v).split())
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
+def day_of(v) -> date:
+    try:
+        d = date.fromisoformat(str(v))
+    except ValueError:
+        raise Problem("That is not a date Synla knows.") from None
+    if not 2000 <= d.year <= 2100:
+        raise Problem("Synla shows the years 2000 to 2100.")
+    return d
+
+
+def number_of(v) -> int:
+    try:
+        return int(str(v))
+    except ValueError:
+        raise Problem("That is not a number Synla knows.") from None
+
+
+def year_of(q, app) -> int:
+    y = number_of(q.get("y", [app.today().year])[0])
+    if not 2000 <= y <= 2100:
+        raise Problem("Synla shows the years 2000 to 2100.")
+    return y
+
+
+def project_in(app, v) -> str:
+    name = clean(v, 60)
+    if not name:
+        raise Problem("Pick both a project and a kind of work.")
+    if name not in app.projects:
+        raise Problem(f"Pick a {roles.word(app.config).lower()} from the list, or add it first.")
+    return name
+
+
+def kind_in(v) -> str:
+    if not isinstance(v, str) or v not in KINDS:
+        raise Problem("Pick a kind of work.")
+    return v
+
+
+def code_in(v) -> str:
+    if not isinstance(v, str) or not CODE.match(v):
+        raise Problem("The request did not say which question it answers.")
+    return v
+
+
+def ids_in(v) -> list:
+    if not isinstance(v, list) or len(v) > 5000 or not all(isinstance(x, str) and len(x) <= 200 for x in v):
+        raise Problem("The request did not say which time it is about.")
+    return v
+
+
+def words_in(v) -> list:
+    """The words for a project, with commas between. A word needs two letters or more: one letter would match
+    almost every window."""
+    out = []
+    for w in re.split(r"[,;]", clean(v, 600)):
+        w = w.strip()[:40]
+        if len(w) >= 2 and w.lower() not in (x.lower() for x in out):
+            out.append(w)
+    return out[:30]
+
+
+def hours_in(v) -> float:
+    try:
+        h = float(str(v).replace(",", "."))
+    except ValueError:
+        raise Problem("Write the hours as a number, for example 37.5.") from None
+    if not math.isfinite(h):
+        raise Problem("Write the hours as a number, for example 37.5.")
+    return h
+
+
+def minutes_in(v) -> float | None:
+    if v == "rest":
+        now = datetime.now().astimezone()
+        return (datetime.combine(now.date() + timedelta(days=1), time(0), now.tzinfo) - now).total_seconds() / 60
+    try:
+        m = float(v or 0)
+    except (TypeError, ValueError):
+        raise Problem("Pause for a number of minutes.") from None
+    if not math.isfinite(m) or not 0 <= m <= 7 * 24 * 60:
+        raise Problem("Pause for up to a week.")
+    return m or None
+
+
+def make_handler(app, token: str, port: int, seen: list | None = None, *, key: str):
+    """The pages and the actions behind their buttons. Every request must name this computer (stops DNS rebinding)
+    and carry the key cookie; every change must also carry the page token, sent as JSON."""
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    cookie = cookie_name(key)
+    lock = threading.RLock()        # one request at a time, so two clicks at once cannot mix up your answers
 
     class H(BaseHTTPRequestHandler):
+        timeout = 20                # seconds: a connection that stops sending is closed
+        reply = None
+
         def log_message(self, *a):
             pass
 
         def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
+            self.reply = (code, body, ctype, extra or {})
+
+        def _flush(self):
+            code, body, ctype, extra = self.reply or (500, OOPS, TEXT, {})
             data = body.encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Content-Security-Policy", CSP)
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("Content-Security-Policy", CSP)
+                for k, v in extra.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:         # the browser went away
+                self.close_connection = True
 
         def _json(self, obj):
             return self._send(200, json.dumps(obj), "application/json; charset=utf-8")
 
         def _host_ok(self) -> bool:
-            if seen is not None:
-                seen[0] = clock.monotonic()
             return self.headers.get("Host", "") in allowed_hosts
+
+        def _has_key(self) -> bool:
+            for part in self.headers.get("Cookie", "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == cookie and same(value, key):
+                    if seen is not None:
+                        seen[0] = clock.monotonic()
+                    return True
+            return False
 
         def _date(self, q):
             v = q.get("date", [None])[0]
-            return date.fromisoformat(v) if v else app.today()
+            return day_of(v) if v else app.today()
 
         def do_GET(self):
-            if not self._host_ok():
-                return self._send(403, "Synla only answers on 127.0.0.1 or localhost.", "text/plain")
-            u = urlparse(self.path)
-            q = parse_qs(u.query)
-            try:
-                if u.path == "/":
-                    return self._send(200, today_page(app, app.today(), token))
-                if u.path == "/day":
-                    return self._send(200, today_page(app, self._date(q), token))
-                if u.path == "/week":
-                    return self._send(200, week_page(app, self._date(q), token))
-                if u.path == "/week/timesheet":
-                    return self._send(200, timesheet_page(app, self._date(q), token))
-                if u.path == "/week/indicators":
-                    return self._send(200, indicators_page(app, self._date(q), token))
-                if u.path == "/record":
-                    return self._send(200, record_page(app, token))
-                if u.path == "/year":
-                    return self._send(200, year_page(app, int(q.get("y", [app.today().year])[0]), token))
-                if u.path == "/year.csv":
-                    y = int(q.get("y", [app.today().year])[0])
-                    return self._send(200, year_csv(app, y), "text/csv; charset=utf-8",
-                                      {"Content-Disposition": f"attachment; filename=synla-year-{y}.csv"})
-                if u.path == "/record/statement.json":
-                    name, text = statement_file(app, int(q["seq"][0]))
-                    return self._send(200, text, "application/json; charset=utf-8",
-                                      {"Content-Disposition": f"attachment; filename={name}"})
-                if u.path == "/role":
-                    return self._send(200, role_page(app, token))
-                if u.path == "/data":
-                    return self._send(200, data_page(app, token))
-                if u.path == "/export.csv":
-                    d = self._date(q)
-                    excel = q.get("format", [""])[0] == "excel"
-                    return self._send(200, csv_text(app, d, excel), "text/csv; charset=utf-8",
-                                      {"Content-Disposition": f"attachment; filename=timesheet-{monday_of(d)}"
-                                                              f"{'-excel' if excel else ''}.csv"})
-                if u.path == "/summary.txt":
-                    return self._send(200, report.text(app.summary(self._date(q))), "text/plain; charset=utf-8")
-                if u.path == "/ping":
-                    return self._send(200, "synla", "text/plain")
-                return self._send(404, "Not found", "text/plain")
-            except Exception as e:     # show the problem instead of a blank page
-                return self._send(500, f"Synla could not show this page: {e}", "text/plain; charset=utf-8")
+            self.reply = None
+            with lock:
+                self._get()
+            self._flush()
 
         def do_POST(self):
+            self.reply = None
+            body = self._body()             # read before taking the lock, so a slow sender holds up nobody
+            if body is not None:
+                with lock:
+                    self._post(body)
+            self._flush()
+
+        # ---- reading pages ----
+        def _get(self):
             if not self._host_ok():
-                return self._send(403, "Synla only answers on 127.0.0.1 or localhost.", "text/plain")
-            if not secrets.compare_digest(self.headers.get("X-Synla-Token", ""), token) or \
+                return self._send(403, HOST_ONLY, TEXT)
+            u = urlparse(self.path)
+            q = parse_qs(u.query)
+            if u.path == "/ping":           # open, so Synla can see it runs; the answer shows it knows the key
+                n = q.get("n", [""])[0][:64]
+                return self._send(200, f"synla {proof(key, 'ping:' + n)}" if n else "synla", TEXT)
+            if "key" in q:                  # Synla opened this page: keep the key in this browser, then drop it
+                if not same(q["key"][0], key):
+                    return self._send(401, LOCKED)
+                rest = urlencode([(k, v) for k, vs in q.items() if k != "key" for v in vs])
+                where = "/" + u.path.lstrip("/") + (f"?{rest}" if rest else "")
+                return self._send(303, "", TEXT, {"Location": where, "Set-Cookie": f"{cookie}={key}; Max-Age=31536000; "
+                                                                                 f"Path=/; HttpOnly; SameSite=Strict"})
+            if not self._has_key():
+                return self._send(401, LOCKED)
+            try:
+                self._route_get(u.path, q)
+            except Problem as e:
+                self._send(400, str(e), TEXT)
+            except Exception as e:          # show a plain message, never the inside of the program
+                app.store.error(f"GET {u.path}", e)
+                self._send(500, OOPS, TEXT)
+
+        def _route_get(self, path, q):
+            if path == "/":
+                if app.needs_setup():
+                    return self._send(303, "", TEXT, {"Location": "/start"})
+                return self._send(200, today_page(app, app.today(), token))
+            if path == "/start":
+                if not app.needs_setup():          # once set up, changes go through the Projects page
+                    return self._send(303, "", TEXT, {"Location": "/"})
+                return self._send(200, setup_page(app, token))
+            if path == "/projects":
+                return self._send(200, projects_page(app, token))
+            if path == "/day":
+                return self._send(200, today_page(app, self._date(q), token))
+            if path == "/week":
+                return self._send(200, week_page(app, self._date(q), token))
+            if path == "/week/timesheet":
+                return self._send(200, timesheet_page(app, self._date(q), token))
+            if path == "/week/indicators":
+                return self._send(200, indicators_page(app, self._date(q), token))
+            if path == "/record":
+                return self._send(200, record_page(app, token))
+            if path == "/year":
+                return self._send(200, year_page(app, year_of(q, app), token))
+            if path == "/year.csv":
+                y = year_of(q, app)
+                return self._send(200, year_csv(app, y), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": f"attachment; filename=synla-year-{y}.csv"})
+            if path == "/record/statement.json":
+                name, text = statement_file(app, number_of(q.get("seq", [""])[0]))
+                return self._send(200, text, "application/json; charset=utf-8",
+                                  {"Content-Disposition": f"attachment; filename={name}"})
+            if path == "/role":
+                return self._send(200, role_page(app, token))
+            if path == "/data":
+                return self._send(200, data_page(app, token))
+            if path == "/export.csv":
+                d = self._date(q)
+                excel = q.get("format", [""])[0] == "excel"
+                return self._send(200, csv_text(app, d, excel), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": f"attachment; filename=timesheet-{monday_of(d)}"
+                                                          f"{'-excel' if excel else ''}.csv"})
+            if path == "/summary.txt":
+                return self._send(200, report.text(app.summary(self._date(q))), TEXT)
+            return self._send(404, "Not found", TEXT)
+
+        # ---- changes ----
+        def _body(self):
+            """The request as a dict, or None when it is refused (the refusal is then the reply)."""
+            if not self._host_ok():
+                return self._send(403, HOST_ONLY, TEXT)
+            if not self._has_key():
+                return self._send(403, "Open Synla again from its reminder or with python -m synla, then try again.", TEXT)
+            if not same(self.headers.get("X-Synla-Token", ""), token) or \
                     not self.headers.get("Content-Type", "").startswith("application/json"):
-                return self._send(403, "This request did not come from Synla's own page.", "text/plain")
-            n = int(self.headers.get("Content-Length", 0))
+                return self._send(403, "This request did not come from Synla's own page.", TEXT)
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if n < 0:
+                self.close_connection = True
+                return self._send(400, "The request did not say how long it is.", TEXT)
+            if n > BODY_MAX:
+                self.close_connection = True
+                return self._send(413, "The request is too large.", TEXT)
             try:
                 body = json.loads(self.rfile.read(n) or b"{}")
-                path = self.path
-                if path == "/api/answer":
-                    if not body.get("project") or body.get("kind") not in KINDS:
-                        return self._send(400, "Pick both a project and a kind of work.", "text/plain")
-                    how = body.get("how") if body.get("how") in ("block", "window", "split", "spot") else "block"
-                    app.answer(date.fromisoformat(body["date"]), body["ids"], body["project"], body["kind"], how,
-                               asked=bool(body.get("asked")))
-                    return self._json({"ok": True, "undo": app.last_undo})
-                if path == "/api/approve":
-                    count = app.approve_confident(date.fromisoformat(body["date"]))
-                    return self._json({"ok": True, "undo": app.last_undo, "count": count})
-                if path == "/api/skip":
-                    app.skip(date.fromisoformat(body["date"]), str(body.get("code", ""))[:64])
-                    return self._json({"ok": True, "undo": app.last_undo})
-                if path == "/api/gap":
-                    d, code = date.fromisoformat(body["date"]), str(body.get("code", ""))[:64]
-                    if body.get("notWork"):
-                        app.gap_not_work(d, code)
-                    else:
-                        if not body.get("project") or body.get("kind") not in KINDS:
-                            return self._send(400, "Pick a project and a kind of work, or Not work.", "text/plain")
-                        app.answer_gap(d, code, body.get("start", ""), body.get("end", ""), body["project"], body["kind"],
-                                       bool(body.get("meeting")))
-                    return self._json({"ok": True, "undo": app.last_undo})
-                if path == "/api/codes":
-                    c = app.store.config()
-                    clean = lambda v: " ".join(str(v).split())[:20]
-                    for p, code in (body.get("projects") or {}).items():
-                        if p in c.get("projects", {}) and isinstance(c["projects"][p], dict):
-                            if clean(code):
-                                c["projects"][p]["code"] = clean(code)
-                            else:
-                                c["projects"][p].pop("code", None)
-                    c["absenceCodes"] = {k: clean(v) for k, v in (body.get("absence") or {}).items() if k in OFF and clean(v)}
-                    app.store.save_config(c)
-                    app.reload()
-                    return self._json({"ok": True})
-                if path == "/api/dayoff":
-                    kind = str(body.get("kind") or "")
-                    if kind and kind not in OFF:
-                        return self._send(400, "Pick vacation, sick, sick child or time off.", "text/plain")
-                    app.set_day_off(date.fromisoformat(body["date"]), kind or None)
-                    return self._json({"ok": True, "undo": app.last_undo})
-                if path == "/api/more":
-                    app.ask_more(date.fromisoformat(body["date"]))
-                elif path == "/api/undo":
-                    app.undo(str(body.get("token", "")))
-                elif path == "/api/project":
-                    name = " ".join(str(body.get("name", "")).split())[:60]
-                    if not name:
-                        return self._send(400, "Give the project a name.", "text/plain")
-                    if name not in app.projects:
-                        app.add_project(name)
-                    return self._json({"ok": True, "name": name, "color": color(app, name)})
-                elif path == "/api/pause":
-                    m = body.get("minutes")
-                    if m == "rest":
-                        now = datetime.now().astimezone()
-                        m = (datetime.combine(now.date() + timedelta(days=1), time(0), now.tzinfo) - now).total_seconds() / 60
-                    app.store.pause(float(m or 0) or None)
-                elif path == "/api/time":
-                    start = app.add_time(date.fromisoformat(body["date"]), body.get("start", ""), body.get("end", ""),
-                                         body.get("project", ""), body.get("kind", ""), bool(body.get("meeting")))
-                    return self._json({"ok": True, "id": start})
-                elif path == "/api/time/remove":
-                    app.remove_time(body["start"])
-                elif path == "/api/seal":
-                    s = app.seal(date.fromisoformat(body["week"]))
-                    return self._json({"ok": True, "fingerprint": s["fingerprint"]})
-                elif path == "/api/settings":
-                    c = app.store.config()
-                    if "recordEmail" in body:
-                        email = (body.get("recordEmail") or "").strip()
-                        if email and not EMAIL.match(email):
-                            return self._send(400, "That does not look like an email address.", "text/plain")
-                        c["recordEmail"] = email
-                    for k in ("askAboutGaps", "spotChecks", "detectCalls"):
-                        if k in body:
-                            c[k] = bool(body[k])
-                    if "role" in body:
-                        if body["role"] not in roles.ROLES:
-                            return self._send(400, "Unknown role.", "text/plain")
-                        c["role"] = body["role"]
-                    if "kindNames" in body:
-                        given = body["kindNames"] if isinstance(body["kindNames"], dict) else {}
-                        c["kindNames"] = {k: " ".join(str(v).split())[:40] for k, v in given.items()
-                                          if k in KINDS and str(v).strip()}
-                    app.store.save_config(c)
-                    app.reload()
-                elif path == "/api/delete":
-                    what = body.get("what")
-                    if what == "windows":
-                        recorder.prune(app.store, 0)
-                        app.reload()
-                    elif what == "all":
-                        app.store.delete_everything()
-                        app.reload()
-                    elif what == "record":
-                        app.record.delete_all()
-                    else:
-                        return self._send(400, "Unknown delete request.", "text/plain")
-                else:
-                    return self._send(404, "Not found", "text/plain")
-                return self._json({"ok": True})
-            except ValueError as e:
-                return self._send(400, str(e) or "Something in the request was not valid.", "text/plain")
+            except (OSError, ValueError):
+                self.close_connection = True
+                return self._send(400, "The request was not valid JSON.", TEXT)
+            if not isinstance(body, dict):
+                return self._send(400, "The request was not valid JSON.", TEXT)
+            return body
+
+        def _post(self, body):
+            path = urlparse(self.path).path
+            try:
+                self._route_post(path, body)
+            except Problem as e:
+                self._send(400, str(e), TEXT)
             except Exception as e:
-                return self._send(500, str(e), "text/plain")
+                app.store.error(f"POST {path}", e)
+                self._send(500, OOPS, TEXT)
+
+        def _route_post(self, path, body):
+            if path == "/api/answer":
+                d, ids = day_of(body.get("date")), ids_in(body.get("ids"))
+                project, kind = project_in(app, body.get("project")), kind_in(body.get("kind"))
+                how = body.get("how") if body.get("how") in ("block", "window", "split", "spot") else "block"
+                app.answer(d, ids, project, kind, how, asked=bool(body.get("asked")))
+                return self._json({"ok": True, "undo": app.last_undo})
+            if path == "/api/approve":
+                count = app.approve_confident(day_of(body.get("date")))
+                return self._json({"ok": True, "undo": app.last_undo, "count": count})
+            if path == "/api/skip":
+                app.skip(day_of(body.get("date")), code_in(body.get("code")))
+                return self._json({"ok": True, "undo": app.last_undo})
+            if path == "/api/gap":
+                d, code = day_of(body.get("date")), code_in(body.get("code"))
+                if body.get("notWork"):
+                    app.gap_not_work(d, code)
+                else:
+                    project, kind = project_in(app, body.get("project")), kind_in(body.get("kind"))
+                    app.answer_gap(d, code, clean(body.get("start"), 8), clean(body.get("end"), 8), project, kind,
+                                   bool(body.get("meeting")))
+                return self._json({"ok": True, "undo": app.last_undo})
+            if path == "/api/codes":
+                given, absence = body.get("projects") or {}, body.get("absence") or {}
+                if not isinstance(given, dict) or not isinstance(absence, dict):
+                    raise Problem("The codes were not sent as a list.")
+                c = app.store.config()
+                for p, code in given.items():
+                    if p in c.get("projects", {}) and isinstance(c["projects"][p], dict):
+                        if clean(code, 20):
+                            c["projects"][p]["code"] = clean(code, 20)
+                        else:
+                            c["projects"][p].pop("code", None)
+                c["absenceCodes"] = {k: clean(v, 20) for k, v in absence.items() if k in OFF and clean(v, 20)}
+                app.store.save_config(c)
+                app.reload()
+                return self._json({"ok": True})
+            if path == "/api/dayoff":
+                kind = body.get("kind") or ""
+                if not isinstance(kind, str) or kind and kind not in OFF:
+                    raise Problem("Pick vacation, sick, sick child or time off.")
+                app.set_day_off(day_of(body.get("date")), kind or None)
+                return self._json({"ok": True, "undo": app.last_undo})
+            if path == "/api/more":
+                app.ask_more(day_of(body.get("date")))
+            elif path == "/api/undo":
+                app.undo(clean(body.get("token"), 64))
+            elif path == "/api/project":
+                name = clean(body.get("name"), 60)
+                if not name:
+                    raise Problem("Give the project a name.")
+                if reserved(name):
+                    raise Problem("Synla uses that name itself. Pick another.")
+                name = app.add_project(name)
+                return self._json({"ok": True, "name": name, "color": color(app, name)})
+            elif path == "/api/pause":
+                app.store.pause(minutes_in(body.get("minutes")))
+            elif path == "/api/time":
+                d = day_of(body.get("date"))
+                project, kind = project_in(app, body.get("project")), kind_in(body.get("kind"))
+                start = app.add_time(d, clean(body.get("start"), 8), clean(body.get("end"), 8), project, kind,
+                                     bool(body.get("meeting")))
+                return self._json({"ok": True, "id": start})
+            elif path == "/api/time/remove":
+                app.remove_time(clean(body.get("start"), 64))
+            elif path == "/api/seal":
+                s = app.seal(monday_of(day_of(body.get("week"))))
+                return self._json({"ok": True, "fingerprint": s["fingerprint"]})
+            elif path == "/api/settings":
+                c = app.store.config()
+                if "recordEmail" in body:
+                    email = clean(body.get("recordEmail"), 254)
+                    if email and not EMAIL.match(email):
+                        raise Problem("That does not look like an email address.")
+                    c["recordEmail"] = email
+                for k in ("askAboutGaps", "spotChecks", "detectCalls"):
+                    if k in body:
+                        c[k] = bool(body[k])
+                if "role" in body:
+                    if not isinstance(body["role"], str) or body["role"] not in roles.ROLES:
+                        raise Problem("Unknown role.")
+                    c["role"] = body["role"]
+                if "kindNames" in body:
+                    given = body["kindNames"] if isinstance(body["kindNames"], dict) else {}
+                    c["kindNames"] = {k: clean(v, 40) for k, v in given.items() if k in KINDS and clean(v, 40)}
+                app.store.save_config(c)
+                app.reload()
+            elif path == "/api/setup":
+                given = body.get("projects")
+                if not isinstance(given, list) or len(given) > 100 or not all(isinstance(r, dict) for r in given):
+                    raise Problem("The list of projects did not come through. Reload the page and try again.")
+                projects = []
+                for r in given:
+                    name = clean(r.get("name"), 60)
+                    if name:
+                        projects.append((name, words_in(r.get("words"))))
+                role = body.get("role") or roles.DEFAULT
+                app.setup(role if isinstance(role, str) else "", projects, clean(body.get("start"), 5),
+                          clean(body.get("end"), 5), hours_in(body.get("weekly")), bool(body.get("calls")))
+                started = False
+                if WINDOWS and body.get("record"):
+                    recorder.autostart(bool(body.get("autostart")), app.store.other_dir())
+                    started = recording(app) or recorder.start_background(app.store)
+                return self._json({"ok": True, "started": started})
+            elif path == "/api/projects":
+                given = body.get("projects")
+                if not isinstance(given, list) or len(given) > 1000 or not all(isinstance(r, dict) for r in given):
+                    raise Problem("The list did not come through. Reload the page and try again.")
+                rows = []
+                for r in given:
+                    old = r.get("old")
+                    if old is not None and not isinstance(old, str):
+                        raise Problem("The list did not come through. Reload the page and try again.")
+                    name = clean(r.get("name"), 60)
+                    if old is None and not name:
+                        continue                   # an empty new line
+                    rows.append({"old": old, "name": name, "words": words_in(r.get("words")),
+                                 "code": clean(r.get("code"), 20), "archived": bool(r.get("archived"))})
+                app.save_projects(rows)
+            elif path == "/api/record":
+                if not WINDOWS:
+                    raise Problem("Synla's own recorder works on Windows. On Mac and Linux, run ActivityWatch: "
+                                  "Synla reads it on its own.")
+                if not recording(app) and not recorder.start_background(app.store):
+                    raise Problem("The recorder did not start. Another Synla recorder may be running already. "
+                                  "Details may be in errors.log in Synla's folder.")
+            elif path == "/api/autostart":
+                if not WINDOWS:
+                    raise Problem("Starting at sign-in is for Windows.")
+                recorder.autostart(bool(body.get("on")), app.store.other_dir())
+            elif path == "/api/delete":
+                what = body.get("what")
+                if what == "windows":
+                    recorder.prune(app.store, 0)
+                    app.reload()
+                elif what == "all":
+                    kept = app.store.delete_everything()
+                    app.reload()
+                    if kept:
+                        return self._send(409, "Synla deleted everything except " + ", ".join(kept) +
+                                          ", which another program has open. Try again in a minute.", TEXT)
+                elif what == "record":
+                    app.record.delete_all()
+                else:
+                    raise Problem("Unknown delete request.")
+            else:
+                return self._send(404, "Not found", TEXT)
+            return self._json({"ok": True})
     return H
+
+
+class Server(ThreadingHTTPServer):
+    """Listens on this computer only. On Windows the port is held exclusively, so no other program can take it over
+    while Synla runs and see what your browser sends."""
+    daemon_threads = True
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self):
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        socketserver.TCPServer.server_bind(self)        # skips a name lookup that can take seconds on some networks
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+def page_token(key: str) -> str:
+    """The token Synla's own pages send with every change. It follows from the key, so an open page keeps working
+    when Synla starts again."""
+    return proof(key, "page token")[:32]
+
+
+def with_key(url: str, key: str) -> str:
+    return url + ("&" if "?" in url else "?") + "key=" + key
 
 
 def serve(app, port=5700, open_browser=True, start=None, idle_minutes=None):
     """Runs Synla's pages until Ctrl+C, or until nobody has used them for idle_minutes."""
-    token = secrets.token_urlsafe(24)
+    key = app.store.page_key()
     httpd = None
     for p in range(port, port + 10):           # the next port if something else uses this one
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", p), None)
+            httpd = Server(("127.0.0.1", p), None)
             break
         except OSError:
             continue
@@ -1570,11 +2011,11 @@ def serve(app, port=5700, open_browser=True, start=None, idle_minutes=None):
         raise SystemExit(f"Ports {port} to {port + 9} are all in use. Try: python -m synla --port 6800")
     port = httpd.server_address[1]
     seen = [clock.monotonic()]
-    httpd.RequestHandlerClass = make_handler(app, token, port, seen)
+    httpd.RequestHandlerClass = make_handler(app, page_token(key), port, seen, key=key)
     info = app.store.dir / "server.json"
-    info.write_text(json.dumps({"port": port, "pid": os.getpid()}), encoding="utf-8")
-    url = f"http://127.0.0.1:{port}/" + (f"day?date={start}" if start else "")
-    print(f"Synla is running at {url}  (Ctrl+C to stop)")
+    write_whole(info, json.dumps({"port": port, "pid": os.getpid()}))
+    url = with_key(f"http://127.0.0.1:{port}/" + (f"day?date={start}" if start else ""), key)
+    print(f"Synla is running. If your browser did not open, open this link (Ctrl+C to stop):\n{url}", flush=True)
     if open_browser:
         import webbrowser
         webbrowser.open(url)
@@ -1590,7 +2031,8 @@ def serve(app, port=5700, open_browser=True, start=None, idle_minutes=None):
         pass
     finally:
         httpd.server_close()
-        try:
-            info.unlink()
-        except OSError:
+        try:                                   # only if it is still ours: a second Synla may have taken over
+            if json.loads(info.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                info.unlink()
+        except (OSError, ValueError):
             pass

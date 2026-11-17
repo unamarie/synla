@@ -48,6 +48,29 @@ def core(statement: dict) -> dict:
     return {k: v for k, v in statement.items() if k not in ("sealedAt", "version", "sealedBy")}
 
 
+def renamed(old: dict, new: dict) -> dict:
+    """The rename list after more renames: every old name points to the name it has now."""
+    out = {k: new.get(v, v) for k, v in old.items()}
+    out.update(new)
+    return {k: v for k, v in out.items() if k != v}
+
+
+def with_names(statement: dict, names: dict) -> dict:
+    """A record with today's project names, to compare it with today's numbers. The record itself never changes."""
+    if not names:
+        return statement
+    st = json.loads(json.dumps(statement))
+    projects = {}
+    for p, h in st.get("projects", {}).items():
+        projects[names.get(p, p)] = round(projects.get(names.get(p, p), 0) + h, 2)
+    st["projects"] = dict(sorted(projects.items()))
+    for d in st.get("days", []):
+        for r in d.get("stretches", []):
+            if "project" in r:
+                r["project"] = names.get(r["project"], r["project"])
+    return st
+
+
 class RecordBook:
     def __init__(self, store):
         self.store = store
@@ -88,23 +111,38 @@ class RecordBook:
             out[s["week"]] = s
         return out
 
-    def changed(self, week: date, statement: dict) -> bool:
+    def changed(self, week: date, statement: dict, names: dict | None = None) -> bool:
+        """True if the week's numbers differ from its latest seal. names: renamed projects, which are no change."""
         last = self.latest(week)
-        return last is not None and canonical(core(last["data"])) != canonical(core(statement))
+        return last is not None and canonical(core(with_names(last["data"], names))) != canonical(core(statement))
 
-    def seal(self, statement: dict, by: str = "you") -> dict:
+    def seal(self, statement: dict, by: str = "you", only_new: bool = False) -> dict | None:
+        """Adds a record to the end of the chain. The write lock is taken before reading the last fingerprint, so the
+        recorder sealing a week automatically and you pressing Seal at the same moment cannot fork the chain.
+        only_new: do nothing if the week was sealed in the meantime (automatic sealing)."""
         db = self._db()
-        with db:
+        db.isolation_level = None                 # we say when the transaction starts
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            n = db.execute("SELECT COUNT(*) FROM seals WHERE week = ?", (statement["week"],)).fetchone()[0]
+            if only_new and n:
+                db.execute("ROLLBACK")
+                return None
             last = db.execute("SELECT fingerprint FROM seals ORDER BY seq DESC LIMIT 1").fetchone()
             prev = last[0] if last else self._start(db)
-            n = db.execute("SELECT COUNT(*) FROM seals WHERE week = ?", (statement["week"],)).fetchone()[0]
             st = dict(statement, version=n + 1, sealedBy=by,
                       sealedAt=datetime.now(timezone.utc).isoformat(timespec="seconds"))
             text = canonical(st)
             fp = fingerprint(prev, text)
             db.execute("INSERT INTO seals (week, version, sealedat, statement, prev, fingerprint) VALUES (?,?,?,?,?,?)",
                        (st["week"], st["version"], st["sealedAt"], text, prev, fp))
-        db.close()
+            db.execute("COMMIT")
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
+        finally:
+            db.close()
         return self.latest(date.fromisoformat(statement["week"]))
 
     def verify(self) -> dict:

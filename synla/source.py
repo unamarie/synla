@@ -16,14 +16,40 @@ from . import protect
 
 # localhost only, and never through a proxy, so nothing about your activity passes another machine
 _LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+AW_URL = "http://127.0.0.1:5600"
+AW_RETRY = 300          # seconds: after ActivityWatch was not there, Synla does not knock again for a while
+UNREADABLE = "Window name cannot be read on this account"
+
+
+def on_this_computer(url: str) -> bool:
+    """True for an address on this computer. Synla never reads activity from another one."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+        return u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1", "::1")
+    except ValueError:
+        return False
 
 
 class ActivityWatch:
     """Reads from ActivityWatch's local API. ActivityWatch keeps its own history; Synla cannot delete it."""
     name = "ActivityWatch"
 
-    def __init__(self, url="http://localhost:5600"):
+    def __init__(self, url=AW_URL):
+        url = url if on_this_computer(url) else AW_URL
+        # localhost would try IPv6 first: on Windows each refused try costs two seconds
+        url = url.replace("://localhost", "://127.0.0.1", 1)
         self.url = url.rstrip("/") + "/api/0"
+        u = urllib.parse.urlsplit(url)
+        self.address = (u.hostname, u.port or 80)
+
+    def reachable(self) -> bool:
+        """A quick knock on the door. On Windows a refused connection takes seconds, so this gives up after half a
+        second: ActivityWatch on this computer answers in a millisecond."""
+        try:
+            with socket.create_connection(self.address, timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def _get(self, path, **params):
         q = ("?" + urllib.parse.urlencode(params)) if params else ""
@@ -40,6 +66,8 @@ class ActivityWatch:
         return (mine or ids)[0]
 
     def running(self) -> bool:
+        if not self.reachable():
+            return False
         try:
             self._get("/info")
             return True
@@ -47,6 +75,8 @@ class ActivityWatch:
             return False
 
     def events(self, start: datetime, end: datetime):
+        if not self.reachable():
+            raise ConnectionRefusedError("ActivityWatch is not running on this computer.")
         p = dict(start=start.isoformat(), end=end.isoformat(), limit=-1)
         win = self._get(f"/buckets/{urllib.parse.quote(self._bucket('aw-watcher-window'))}/events", **p)
         afk = self._get(f"/buckets/{urllib.parse.quote(self._bucket('aw-watcher-afk'))}/events", **p)
@@ -81,7 +111,13 @@ class SynlaRecorder:
                 return ""
             b = bytes(b)
             if b not in cache:
-                cache[b] = protect.dec(b)
+                try:
+                    cache[b] = protect.dec(b)
+                except (OSError, ValueError):      # encrypted for another Windows account, or damaged
+                    cache[b] = UNREADABLE
+                    self.store.damaged["activity.db"] = ("Some window names in activity.db cannot be read on this "
+                                                         "Windows account, for example after the folder was copied "
+                                                         "from another account. Synla shows them as unreadable.")
             return cache[b]
 
         win = []
@@ -104,17 +140,21 @@ class Auto:
         self.aw = ActivityWatch(aw_url)
         self.used = None
         self.name = "Synla recorder or ActivityWatch"
+        self.away_until = 0.0              # ActivityWatch was not there: do not knock again before this
 
     def events(self, start: datetime, end: datetime):
         if self.recorder.has_data(start, end):
             self.used = self.recorder.name
             return self.recorder.events(start, end)
+        self.used = None
+        if time.monotonic() < self.away_until:
+            return [], []
         try:
             win, afk = self.aw.events(start, end)
             self.used = self.aw.name
             return win, afk
-        except Exception:
-            self.used = None
+        except Exception:                  # not installed or not running: most people
+            self.away_until = time.monotonic() + AW_RETRY
             return [], []
 
 

@@ -1,14 +1,21 @@
+import ast
 import base64
 import csv
+import hashlib
+import http.client
+import http.server
 import io
 import json
 import os
+import socket
 import time as time_module
 from pathlib import Path
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -20,7 +27,7 @@ from synla.model import KINDS, MANUAL_APP
 from synla.blocks import segments
 from synla.classify import Classifier
 from synla.context import features
-from synla.server import ThreadingHTTPServer, make_handler
+from synla.server import Server as ThreadingHTTPServer, Server, cookie_name, make_handler, proof
 from synla.source import SynlaRecorder
 from synla.store import Store
 
@@ -45,7 +52,19 @@ def truth(title):
 
 
 MONDAY = datetime(2026, 11, 2).astimezone()
-LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+KEY = "k" * 43
+
+
+class _Key(urllib.request.BaseHandler):
+    """Sends the page key, as the browser does once Synla has opened its pages."""
+    def http_request(self, req):
+        if not req.has_header("Cookie"):
+            req.add_unredirected_header("Cookie", f"{cookie_name(KEY)}={KEY}")
+        return req
+
+
+LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Key())
+NOKEY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @pytest.fixture
@@ -326,7 +345,7 @@ def test_windows_probe_answers():
 def server(app):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
     port = httpd.server_address[1]
-    httpd.RequestHandlerClass = make_handler(app, "secret-token", port)
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port, key=KEY)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{port}", port
     httpd.shutdown()
@@ -1167,7 +1186,7 @@ def test_days_off_over_http(tmp_path):
     app = _two_days(tmp_path)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
     port = httpd.server_address[1]
-    httpd.RequestHandlerClass = make_handler(app, "secret-token", port)
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port, key=KEY)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -1273,7 +1292,7 @@ def test_synla_asks_once_about_the_microphone(tmp_path):
     app = Synla(store)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
     port = httpd.server_address[1]
-    httpd.RequestHandlerClass = make_handler(app, "secret-token", port)
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port, key=KEY)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -1307,3 +1326,480 @@ def test_the_week_goes_to_a_reporting_system_with_your_codes(app, server):
     assert excel.startswith("\ufeffdate;code;project;hours") and f"{friday.isoformat()};FERIE;Vacation;7,5" in excel
     page = LOCAL.open(f"{base}/week/timesheet?date={MONDAY.date()}").read().decode()
     assert "Download for Excel" in page and "FERIE" in page and "1001" in page
+
+
+# ---- safety and integrity ------------------------------------------------------------------------------------------
+NASTY = "</textarea></title>\"'><pwn data-pwn=1>"
+
+
+class Tags(HTMLParser):
+    """Finds markup that came from data instead of from Synla, and the page's own scripts."""
+
+    def __init__(self):
+        super().__init__()
+        self.bad, self.scripts, self.inside = [], [], False
+
+    def handle_starttag(self, tag, attrs):
+        if tag.startswith("pwn") or any(k == "data-pwn" for k, _ in attrs):
+            self.bad.append(tag)
+        self.inside = tag == "script"
+
+    def handle_endtag(self, tag):
+        self.inside = False
+
+    def handle_data(self, data):
+        if self.inside:
+            self.scripts.append(data)
+
+
+def raw(base, path, headers=None, method="GET", body=None):
+    """One request as it is, without the key and without following redirects."""
+    u = urllib.parse.urlsplit(base)
+    c = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
+    c.request(method, path, body=body, headers=headers or {})
+    r = c.getresponse()
+    out = r.status, dict(r.getheaders()), r.read().decode("utf-8", "replace")
+    c.close()
+    return out
+
+
+def test_pages_open_only_with_the_key(server):
+    base, port = server
+    status, _, text = raw(base, "/")
+    assert status == 401 and "Open Synla again" in text and "Internal" not in text
+    assert raw(base, "/day?key=wrong")[0] == 401
+    status, h, _ = raw(base, f"/day?date={MONDAY.date()}&key={KEY}")
+    assert status == 303 and h["Location"] == f"/day?date={MONDAY.date()}"
+    assert h["Set-Cookie"].startswith(f"{cookie_name(KEY)}={KEY};") and "HttpOnly" in h["Set-Cookie"] and \
+        "SameSite=Strict" in h["Set-Cookie"]
+    assert not raw(base, f"//evil.example/?key={KEY}")[1]["Location"].startswith("//")   # never to another site
+    assert raw(base, "/ping")[2] == "synla" and raw(base, "/ping?n=abc")[2] == "synla " + proof(KEY, "ping:abc")
+    assert raw(base, "/", {"Cookie": f"other=1; {cookie_name(KEY)}={KEY}"})[0] == 200
+    assert raw(base, "/", {"Cookie": f"{cookie_name(KEY)}=wrong"})[0] == 401
+    assert cookie_name(KEY) != cookie_name("another key for the demo folder")
+    change = {"Content-Type": "application/json", "X-Synla-Token": "secret-token"}
+    assert raw(base, "/api/more", change, "POST", b'{"date": "2026-11-02"}')[0] == 403      # the token is not enough
+
+
+def test_nasty_names_stay_text_on_every_page(app, server):
+    base, _ = server
+    src = Path(app.config["source"])
+    data = json.loads(src.read_text(encoding="utf-8"))
+    data["window"][0]["data"]["title"] += " " + NASTY
+    data["window"][1]["data"]["app"] = "x" + NASTY + ".exe"
+    src.write_text(json.dumps(data), encoding="utf-8")
+    c = app.store.config()
+    c["projects"]["P " + NASTY] = {"keywords": ["budget"], "code": "C" + NASTY}
+    c["kindNames"] = {"firefighting": "F " + NASTY}
+    c["recordEmail"] = NASTY.replace(" ", "") + "@x.no"
+    c["absenceCodes"] = {"vacation": "V" + NASTY}
+    app.store.save_config(c)
+    app.reload()
+    d = MONDAY.date()
+    answer_all(app, d)
+    app.answer(d, [s.id for s in app.day(d)[0].segments], "P " + NASTY, "firefighting")
+    app.set_day_off(d + timedelta(days=4), "vacation")
+    app.seal(d)
+    app.store.damaged["config.json"] = "config.json " + NASTY
+    pages = ["/", f"/week?date={d}", f"/week/timesheet?date={d}", f"/week/indicators?date={d}", "/record",
+             "/year?y=2026", "/role", "/data"] + [f"/day?date={d + timedelta(days=i)}" for i in range(5)]
+    for p in pages:
+        r = LOCAL.open(base + p)
+        html = r.read().decode()
+        t = Tags()
+        t.feed(html)
+        assert not t.bad, p
+        assert "could not be read" in html or "config.json" in html
+        csp = r.headers["Content-Security-Policy"]
+        assert "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+        assert t.scripts and all(f"'sha256-{base64.b64encode(hashlib.sha256(js.encode()).digest()).decode()}'" in csp
+                                 for js in t.scripts)
+
+
+def test_exports_hold_no_formulas(app, server):
+    base, _ = server
+    evil = '=HYPERLINK("http://x.example","Click")'
+    c = app.store.config()
+    c["projects"][evil] = {"keywords": [], "code": "+1"}
+    app.store.save_config(c)
+    app.reload()
+    d = MONDAY.date()
+    answer_all(app, d)
+    app.answer(d, [s.id for s in app.day(d)[0].segments], evil, "project")
+    for q in ("", "&format=excel"):
+        rows = list(csv.reader(io.StringIO(LOCAL.open(f"{base}/export.csv?date={d}{q}").read().decode("utf-8-sig")),
+                               delimiter=";" if q else ","))
+        mine = [r for r in rows if evil in r[2]]
+        assert mine and all(r[2] == "'" + evil and r[1] == "'+1" for r in mine)
+    page = LOCAL.open(f"{base}/week/timesheet?date={d}").read().decode()
+    assert "&#x27;+1\t&#x27;=HYPERLINK" in page                       # the copied table too
+
+
+def test_bad_requests_get_a_plain_no(app, server, monkeypatch):
+    base, port = server
+    key = {**OK, "Cookie": f"{cookie_name(KEY)}={KEY}"}
+    assert raw(base, "/api/more", {**key, "Content-Length": "2000000"}, "POST", b"")[0] == 413
+    assert raw(base, "/api/more", {**key, "Content-Length": "-5"}, "POST", b"")[0] == 400
+    assert raw(base, "/api/more", key, "POST", b"{not json")[0] == 400
+    assert raw(base, "/api/more", key, "POST", b"[1, 2]")[0] == 400
+    d = str(MONDAY.date())
+    q = app.questions(MONDAY.date())["items"][0]
+    for body in ({"date": d, "ids": q["ids"], "project": "Nope", "kind": "admin"},
+                 {"date": d, "ids": {"a": 1}, "project": "Internal", "kind": "admin"},
+                 {"date": d, "ids": q["ids"], "project": ["Internal"], "kind": "admin"},
+                 {"date": d, "ids": q["ids"], "project": "Internal", "kind": ["admin"]},
+                 {"date": "9999-01-01", "ids": q["ids"], "project": "Internal", "kind": "admin"},
+                 {"date": "soon", "ids": q["ids"], "project": "Internal", "kind": "admin"}):
+        assert post(f"{base}/api/answer", body, OK) == 400, body
+    assert not app.store.decisions()                                   # nothing half-saved
+    for url, body in (("pause", {"minutes": "inf"}), ("pause", {"minutes": {"x": 1}}), ("undo", {"token": "ø"}),
+                      ("project", {"name": "?"}), ("dayoff", {"date": d, "kind": ["sick"]}),
+                      ("codes", {"projects": ["x"]}), ("skip", {"date": d, "code": {"x": 1}}),
+                      ("time", {"date": d, "start": "9", "end": "10:00", "project": "Internal", "kind": "admin"}),
+                      ("settings", {"role": ["sales"]}), ("settings", {"recordEmail": "not an address"})):
+        assert post(f"{base}/api/{url}", body, OK) == 400, (url, body)
+    status, reply = post_json(f"{base}/api/project", {"name": "Ops\u202e\x00 2027\n"}, OK)
+    assert reply["name"] == "Ops 2027"                                 # no hidden or reversing characters
+    for p in ("/day?date=garbage", "/year?y=99999", "/record/statement.json?seq=999", "/record/statement.json"):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            LOCAL.open(base + p)
+        assert e.value.code == 400, p
+    import synla.server as pages
+
+    def boom(*a):
+        raise RuntimeError("C:\\Users\\kari\\secret")
+    monkeypatch.setattr(pages, "week_page", boom)
+    with pytest.raises(urllib.error.HTTPError) as e:
+        LOCAL.open(f"{base}/week")
+    assert e.value.code == 500 and "secret" not in e.value.read().decode()
+    assert "secret" in (app.store.dir / "errors.log").read_text(encoding="utf-8")
+
+
+def test_a_damaged_file_is_said_and_the_last_good_copy_used(app, server):
+    base, _ = server
+    store = app.store
+    c = store.config()
+    c["weeklyHours"] = 30
+    store.save_config(c)
+    c["weeklyHours"] = 32
+    store.save_config(c)
+    (store.dir / "config.json").write_text('{"weeklyHours": 33,', encoding="utf-8")        # a typo by hand
+    fresh = Store(store.dir)
+    assert fresh.config()["weeklyHours"] == 30 and "line 1" in fresh.damaged["config.json"]
+    assert list(store.dir.glob("config.json.damaged-*"))
+    app.reload()
+    assert "A file needs a look" in LOCAL.open(f"{base}/").read().decode()
+    assert post(f"{base}/api/settings", {"askAboutGaps": True}, OK) == 200
+    assert "A file needs a look" not in LOCAL.open(f"{base}/").read().decode()
+    assert json.loads((store.dir / "config.json").read_text(encoding="utf-8"))["weeklyHours"] == 30
+    (store.dir / "manual.json").write_text('{"not": "a list"}', encoding="utf-8")
+    assert store.manual() == [] and "does not hold" in store.damaged["manual.json"]
+
+
+def test_the_recorder_keeps_going_after_a_fault(tmp_path):
+    store = Store(tmp_path)
+
+    class Flaky(FakeWindows):
+        def foreground(self):
+            if self.i == 3:
+                raise RuntimeError("Windows said no")
+            return super().foreground()
+    script = [EXCEL] * 4 + [("Code.exe", "notes \ud800 - Visual Studio Code", 0, False)] * 4 + [(None, None, 0, False)]
+    start = MONDAY.replace(hour=9)
+    probe, t = Flaky(script), [start.timestamp()]
+
+    def sleep(_):
+        probe.i += 1
+        t[0] += recorder.POLL
+    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(script), seal_weeks=False, remind=False)
+    win, _ = SynlaRecorder(store).events(start, start + timedelta(hours=1))
+    assert [e["data"]["app"] for e in win] == ["EXCEL.EXE", "Code.exe"]
+    assert "notes ? - " in win[1]["data"]["title"]                     # a broken character, kept as ?
+    assert "Windows said no" in (tmp_path / "errors.log").read_text(encoding="utf-8")
+
+
+def test_sealing_at_the_same_moment_keeps_one_chain(app):
+    st = app.statement(MONDAY.date())
+    books = [record.RecordBook(app.store) for _ in range(6)]
+    threads = [threading.Thread(target=b.seal, args=(st,)) for b in books]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    v = app.record.verify()
+    assert v["ok"] and v["seals"] == 6
+    assert sorted(s["version"] for s in app.record.seals()) == [1, 2, 3, 4, 5, 6]
+    assert app.record.seal(st, by="auto", only_new=True) is None
+    assert app.seal(MONDAY.date() + timedelta(days=2))["week"] == str(MONDAY.date())   # always the whole week
+
+
+def test_the_launcher_gives_the_key_only_to_synla(tmp_path, monkeypatch):
+    import synla.__main__ as cli
+    store = Store(tmp_path)
+    key = store.page_key()
+    asked = []
+
+    class Impostor(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            asked.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"synla")
+    fake = http.server.HTTPServer(("127.0.0.1", 0), Impostor)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    (tmp_path / "server.json").write_text(json.dumps({"port": fake.server_address[1], "pid": 1}))
+    opened, started = [], []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+    monkeypatch.setattr(cli, "serve", lambda *a, **k: started.append(a))
+    cli.open_page(store, 5700)
+    fake.shutdown()
+    assert started and not opened and asked and not any(key in p for p in asked)
+    real = Server(("127.0.0.1", 0), None)
+    port = real.server_address[1]
+    real.RequestHandlerClass = make_handler(Synla(store), "t", port, key=key)
+    threading.Thread(target=real.serve_forever, daemon=True).start()
+    (tmp_path / "server.json").write_text(json.dumps({"port": port, "pid": 1}))
+    cli.open_page(store, 5700)
+    real.shutdown()
+    assert opened == [f"http://127.0.0.1:{port}/?key={key}"]
+
+
+def test_autostart_works_from_any_folder_name():
+    for root in (r"C:\Users\Kari O'Neil\synla", "C:\\work\\", r"D:\Prosjekter\Bjørn"):
+        cmd = recorder.autostart_command("record", root=root, exe=r"C:\Python312\python.exe")
+        code = cmd.split(" -c ", 1)[1]
+        assert code[0] == code[-1] == '"' and '"' not in code[1:-1] and not code[1:-1].endswith("\\")
+        call = ast.parse(code[1:-1]).body[1].value                   # sys.path.insert(0, the folder)
+        assert ast.literal_eval(call.args[1]) == root
+
+
+def test_delete_everything_says_what_it_could_not_delete(tmp_path, monkeypatch):
+    import synla.store as storage
+    store = Store(tmp_path)
+    play(store, [EXCEL] * 4 + [(None, None, 0, False)], MONDAY.replace(hour=9))
+    store.save_days({"2026-11-02": {"answered": 1}})
+    real = storage.unlink
+
+    def held(path):                       # on Windows the recorder holds activity.db open
+        if path.name in ("days.json", "activity.db"):
+            raise PermissionError(32, "in use")
+        real(path)
+    monkeypatch.setattr(storage, "unlink", held)
+    assert store.delete_everything() == ["days.json"]
+    db = recorder.connect(store)
+    assert db.execute("SELECT COUNT(*) FROM activity").fetchone()[0] == 0
+    db.close()
+
+
+def test_secrets_are_made_once_and_kept(tmp_path):
+    from synla.store import create_once
+    p = tmp_path / "x.key"
+    assert create_once(p, b"first") == b"first" and create_once(p, b"second") == b"first"
+    k = Store(tmp_path).page_key()
+    assert len(k) >= 32 and Store(tmp_path).page_key() == k
+    if sys.platform != "win32":
+        assert (tmp_path / "page.key").stat().st_mode & 0o777 == 0o600
+
+
+def test_copies_and_leftovers_are_cleaned_up(tmp_path):
+    store = Store(tmp_path)
+    for f in ("decisions.json.bak", "decisions.json.123.456.tmp", "days.json.damaged-20261117-101500",
+              "errors.log.9.tmp", "config.json.bak"):
+        (tmp_path / f).write_text("x")
+    old = tmp_path / "memory.json.1.2.tmp"
+    old.write_text("x")
+    os.utime(old, (time_module.time() - 7200,) * 2)
+    Store(tmp_path)                                                  # a crash leftover goes after an hour
+    assert not old.exists() and (tmp_path / "decisions.json.123.456.tmp").exists()
+    store.delete_everything()
+    assert sorted(os.listdir(tmp_path)) == ["config.json.bak"]
+
+
+def test_activity_is_only_read_on_this_computer(tmp_path):
+    store = Store(tmp_path)
+    store.save_config({"source": "activitywatch", "activityWatchUrl": "http://203.0.113.5:5600"})
+    app = Synla(store)
+    assert app.source.url == "http://127.0.0.1:5600/api/0" and "another computer" in store.damaged["activityWatchUrl"]
+
+
+def test_a_missing_activitywatch_costs_one_quick_knock(tmp_path, monkeypatch):
+    from synla.source import ActivityWatch, Auto
+    assert ActivityWatch("http://localhost:5600").url == "http://127.0.0.1:5600/api/0"   # no slow IPv6 try first
+    with socket.socket() as s:                       # a port where nothing listens
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    auto = Auto(Store(tmp_path), f"http://127.0.0.1:{port}")
+    knocks = []
+    real = auto.aw.reachable
+    monkeypatch.setattr(auto.aw, "reachable", lambda: knocks.append(1) or real())
+    t = time_module.monotonic()
+    for i in range(84):                              # what sealing twelve old weeks reads at start
+        day = MONDAY - timedelta(days=i)
+        assert auto.events(day, day + timedelta(days=1)) == ([], [])
+    assert len(knocks) == 1 and time_module.monotonic() - t < 3
+
+
+def test_a_clock_set_back_never_makes_negative_time(tmp_path):
+    import itertools
+    store = Store(tmp_path)
+    times = itertools.chain([0, 5, 10, 7, 12, 17], itertools.repeat(20))
+    start = MONDAY.replace(hour=9).timestamp()
+    probe = FakeWindows([EXCEL] * 3 + [("Code.exe", "notes - Visual Studio Code", 0, False)] * 3)
+
+    def sleep(_):
+        probe.i += 1
+    recorder.run(store, probe, clock=lambda: start + next(times), sleep=sleep, polls=6, seal_weeks=False, remind=False)
+    db = recorder.connect(store)
+    rows = db.execute("SELECT start, end FROM activity ORDER BY start").fetchall()
+    db.close()
+    assert len(rows) == 2 and all(e >= s for s, e in rows) and rows[0][1] <= rows[1][0]
+
+
+# ---- set up and keep up, without editing files ---------------------------------------------------------------------
+def _serve(app, key=KEY):
+    httpd = Server(("127.0.0.1", 0), None)
+    port = httpd.server_address[1]
+    httpd.RequestHandlerClass = make_handler(app, "secret-token", port, key=key)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{port}"
+
+
+def test_first_time_setup_without_editing_files(tmp_path, monkeypatch):
+    import synla.server as pages
+    app = Synla(Store(tmp_path))
+    httpd, base = _serve(app)
+    try:
+        status, h, _ = raw(base, "/", {"Cookie": f"{cookie_name(KEY)}={KEY}"})
+        assert status == 303 and h["Location"] == "/start"
+        html = LOCAL.open(f"{base}/start").read().decode()
+        assert "Welcome to Synla" in html and "data-pickrole" in html and "Never keystrokes" in html
+        good = {"role": "sales", "projects": [{"name": "Acme", "words": "acme, a, , Acme, ACME portal"}, {"name": ""}],
+                "start": "08:00", "end": "16:00", "weekly": "37,5", "calls": True}
+        for bad in ({"start": "17:00"}, {"projects": []}, {"weekly": "lots"}, {"role": "boss"},
+                    {"projects": [{"name": "Acme"}, {"name": "ACME"}]}, {"projects": [{"name": "unsorted"}]}):
+            assert post(f"{base}/api/setup", {**good, **bad}, OK) == 400, bad
+        status, reply = post_json(f"{base}/api/setup", good, OK)
+        assert status == 200 and reply["started"] is False                   # no recorder to start on Linux
+        c = app.store.config()
+        assert c["role"] == "sales" and c["projects"] == {"Acme": {"keywords": ["acme", "ACME portal"]}}
+        assert c["workday"] == {"start": "08:00", "end": "16:00"} and c["weeklyHours"] == 37.5 and c["detectCalls"]
+        assert not app.needs_setup() and "Today" in LOCAL.open(f"{base}/").read().decode()
+        assert LOCAL.open(f"{base}/start").url.endswith("/")                # setup only the first time
+        app.add_time(date(2026, 11, 2), "09:00", "10:00", "Acme", "project")
+        status, _ = post_json(f"{base}/api/setup", {**good, "projects": [{"name": "Other"}]}, OK)
+        assert app.store.config()["projects"]["Acme"]["archived"] is True    # a stale setup tab loses nothing
+        assert post(f"{base}/api/record", {}, OK) == 400                     # Windows only, said in words
+        started, auto = [], []
+        monkeypatch.setattr(pages, "WINDOWS", True)
+        monkeypatch.setattr(recorder, "start_background", lambda store: started.append(1) or True)
+        monkeypatch.setattr(recorder, "autostart", lambda on, home=None: auto.append((on, home)))
+        monkeypatch.setattr(recorder, "autostart_on", lambda home=None: False)
+        status, reply = post_json(f"{base}/api/setup", {**good, "record": True, "autostart": True}, OK)
+        assert reply["started"] is True and started and auto == [(True, str(tmp_path.resolve()))]
+        assert "archived" not in app.store.config()["projects"]["Acme"]       # in the list again: back
+        assert "data-startrec" in LOCAL.open(f"{base}/").read().decode()     # Start, not a command to type
+        assert "data-autostart='1'" in LOCAL.open(f"{base}/data").read().decode()
+        assert post(f"{base}/api/record", {}, OK) == 200
+        monkeypatch.setattr(recorder, "start_background", lambda store: False)
+        assert post(f"{base}/api/record", {}, OK) == 400
+    finally:
+        httpd.shutdown()
+
+
+def test_projects_page_renames_archives_and_keeps_the_record(app, server):
+    base, _ = server
+    d = MONDAY.date()
+    for i in range(5):                    # every stretch answered, so the week no longer rests on guesses
+        answer_all(app, d + timedelta(days=i))
+    app.seal(d)
+    rows = [{"old": p, "name": p, "words": ", ".join(v.get("keywords", [])), "code": ""}
+            for p, v in app.config["projects"].items()]
+    for r in rows:
+        if r["old"] == "Data platform":
+            r.update(name="Data platform 2027", code="1001", words="platform, lakehouse")
+        if r["old"] == "Internal":
+            r["archived"] = True
+    assert post(f"{base}/api/projects", {"projects": rows + [{"old": None, "name": "  ", "words": ""}]}, OK) == 200
+    c = app.store.config()
+    assert "Data platform" not in c["projects"] and c["projects"]["Data platform 2027"]["code"] == "1001"
+    assert c["projects"]["Data platform 2027"]["keywords"] == ["platform", "lakehouse"]
+    assert [v["project"] for v in app.store.decisions().values()].count("Data platform") == 0
+    assert "Data platform 2027" in [v["project"] for v in app.store.decisions().values()]
+    labels = {lab for v in app.store.memory()["project"].values() for lab in v}
+    assert "Data platform 2027" in labels and "Data platform" not in labels
+    assert all(e["answer"][0] != "Data platform" for e in app.store.corrections())
+    assert app.week_status(d)["state"] == "sealed"                       # a new name is not a change to the week
+    assert "Data platform" in app.record.latest(d)["data"]["projects"]   # the sealed record keeps its name
+    lines = report_lines_of(base, d)
+    assert any(r[1] == "1001" and r[2] == "Data platform 2027" for r in lines)
+    assert "Internal" not in app.active and "Internal" not in app.project_choices()[0] + app.project_choices()[1]
+    assert "Internal" in app.classifier.archived
+    same = [dict(r, old=r["name"]) for r in rows]
+    assert post(f"{base}/api/projects", {"projects": same[:1] + [dict(same[1], name=same[0]["name"])]}, OK) == 400
+    assert post(f"{base}/api/projects", {"projects": [dict(same[0], old="Gone")]}, OK) == 400
+    back = [dict(r, name="Data platform") if r["old"] == "Data platform 2027" else r for r in same]
+    assert post(f"{base}/api/projects", {"projects": back}, OK) == 200
+    assert app.week_status(d)["state"] == "sealed" and "Data platform" in app.projects
+    status, reply = post_json(f"{base}/api/project", {"name": "data PLATFORM"}, OK)
+    assert reply["name"] == "Data platform" and len(app.projects) == len(rows)   # the one you have, not a twin
+    status, reply = post_json(f"{base}/api/project", {"name": "internal"}, OK)
+    assert reply["name"] == "Internal" and "Internal" in app.active              # brought back
+    assert "Your projects" in LOCAL.open(f"{base}/projects").read().decode()
+
+
+def report_lines_of(base, d):
+    return list(csv.reader(io.StringIO(LOCAL.open(f"{base}/export.csv?date={d}").read().decode())))
+
+
+def test_keywords_that_would_match_everything_are_ignored():
+    c = Classifier({"projects": {"Budget": {"keywords": ["", "a", " budget "]}, "Old": {"keywords": ["budget"],
+                                                                                         "archived": True}}})
+    assert c.project_keywords == {"Budget": ["budget"]}
+    assert c.guess("EXCEL.EXE", "Anything - Excel").project != "Budget"
+    assert c.guess("EXCEL.EXE", "Budget 2027.xlsx - Excel").project == "Budget"
+    for _ in range(5):
+        c.learn("EXCEL.EXE", "Plan.xlsx - Excel", "Old", "project")
+    assert c.guess("EXCEL.EXE", "Plan.xlsx - Excel").project != "Old"          # archived: never guessed
+
+
+def test_what_synla_starts_uses_the_same_folder(tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("SYNLA_HOME", raising=False)
+    assert Store(tmp_path / ".synla").other_dir() is None                      # the usual folder: nothing to say
+    test = Store(tmp_path / "synla try")
+    assert test.other_dir() == str((tmp_path / "synla try").resolve())
+    cmd = recorder.autostart_command("record", root=r"C:\dev\synla", exe=r"C:\Python\python.exe", home=r"C:\dev\synla try")
+    call = ast.parse(cmd.split(" -c ", 1)[1][1:-1]).body[3].value                # main([...])
+    assert ast.literal_eval(call.args[0]) == ["--home", r"C:\dev\synla try", "record"]
+    ran = []
+
+    class Gone:
+        def poll(self):
+            return 1
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: ran.append(cmd) or Gone())
+    assert recorder.start_background(test) is False and "synla try" in ran[0]      # started for that folder
+
+
+def test_the_dot_stays_on_while_you_are_away(tmp_path, server, app):
+    store = Store(tmp_path)
+    away = [(None, None, 0, False)] * 6                              # nobody at the computer
+    probe, t, seen = FakeWindows(away), [MONDAY.replace(hour=9).timestamp()], []
+
+    def sleep(_):
+        seen.append(recorder.alive(store))
+        probe.i += 1
+        t[0] += recorder.POLL
+    recorder.run(store, probe, clock=lambda: t[0], sleep=sleep, polls=len(away), seal_weeks=False, remind=False)
+    assert all(seen) and not recorder.alive(store)                   # on while it ran, off once it stopped
+    base, _ = server
+    (app.store.dir / recorder.BEAT).touch()
+    app.store.save_config(dict(app.store.config(), source="auto"))
+    app.reload()
+    assert "<span>Recording</span>" in LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
+    old = time_module.time() - 200                                   # a recorder that was stopped by force
+    os.utime(app.store.dir / recorder.BEAT, (old, old))
+    assert "Not recording" in LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()

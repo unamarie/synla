@@ -69,8 +69,11 @@ class Classifier:
             for f, labels in feats.items():
                 for label, n in labels.items():
                     self.memory[t][f][label] = n
-        self.project_keywords = {p: [k.lower() for k in v.get("keywords", [])]
-                                 for p, v in config.get("projects", {}).items()}
+        projects = {p: v for p, v in config.get("projects", {}).items() if isinstance(v, dict)}
+        self.archived = {p for p, v in projects.items() if v.get("archived")}
+        # a keyword of one letter, or an empty one, would match almost every window
+        self.project_keywords = {p: [str(k).strip().lower() for k in v.get("keywords", []) if len(str(k).strip()) >= 2]
+                                 for p, v in projects.items() if p not in self.archived}
 
     # ---- learning --------------------------------------------------------------------------------------------
     def code(self, f: str) -> str:
@@ -140,6 +143,7 @@ class Classifier:
         pv, pwhy = self._votes("project", feats)
         kv, kwhy = self._votes("kind", feats)
         kv = {k: v for k, v in kv.items() if k not in RETIRED}
+        pv = {p: v for p, v in pv.items() if p not in self.archived}
         project, pc = self._pick(pv)
         kind, kc = self._pick(kv)
         if kind == UNKNOWN and project != UNKNOWN:

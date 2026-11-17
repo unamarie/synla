@@ -15,16 +15,17 @@ computer, and has no server, account or admin view. The code is open source: <ht
 
 - No keyboard or mouse hooks, no keystrokes, no screenshots, no clipboard, no file contents, no audio.
 - No web addresses: only the browser tab title.
-- No network traffic. Synla's pages listen on 127.0.0.1 only, with a per-session secret. If ActivityWatch is
-  installed, Synla reads it on localhost:5600.
+- No network traffic. Synla's pages listen on 127.0.0.1 only, on a port held exclusively, and open only with a key
+  that Synla gives the browser it starts. If ActivityWatch is installed, Synla reads it on localhost:5600 and never
+  from another computer.
 - No admin rights, services, drivers or scheduled tasks.
 
 ## What it writes
 
 | Where | What |
 |---|---|
-| `%LOCALAPPDATA%\Synla` | All data. Not roaming, not synced to OneDrive. Window titles encrypted with DPAPI for the current user. |
-| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Synla` | Starts the recorder at sign-in (`pythonw.exe`), only after `python -m synla autostart on` |
+| `%LOCALAPPDATA%\Synla` | All data. Not roaming, not synced to OneDrive. Window titles and keys encrypted with DPAPI for the current user. Problems are noted in `errors.log` there, kept to 50 KB. |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Synla` | Starts the recorder at sign-in (`pythonw.exe`), only if the user chooses it on Synla's setup page or runs `python -m synla autostart on` |
 | `HKCU\Software\Classes\synla` | The link `synla:open` that the end of day notification opens |
 | `HKCU\Software\Classes\AppUserModelId\Synla` | The name shown on the notification |
 
@@ -33,9 +34,14 @@ email addresses and Dynamics 365 contacts are hidden before anything is stored.
 
 ## What security tools may notice
 
-- A Python process that reads window titles and idle time, started at sign-in.
+- A Python process that reads window titles and idle time, started at sign-in. The **Start recording** button starts
+  the same `pythonw.exe` command, with no window.
 - The end of day reminder starts `powershell.exe` (hidden, with an encoded command) to show a standard Windows
   notification. To avoid it, set `"reminder": "off"` in `config.json`; the rest works without it.
+
+## Safety checks
+
+[security.md](security.md) lists what Synla does about access, input, files and errors, each with a test.
 
 ## Requirements and removal
 
