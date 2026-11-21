@@ -8,15 +8,16 @@ KINDS = {
     "meeting":     "Meetings",
     "admin":       "Admin and internal",
     "helping":     "Helping others",
-    "firefighting": "Firefighting",
-    "chasing":     "Chasing information",
-    "datafixing": "Fixing other people's data",
+    "firefighting": "Urgent problems",
+    "chasing":     "Chasing answers",
+    "datafixing": "Fixing other people's errors",
     "travel":      "Travel",
-    "people":      "People: 1:1s, hiring, development",
+    "people":      "People and team: 1:1s, hiring, development",
 }
 INVISIBLE = ("helping", "firefighting", "chasing", "datafixing")
 UNKNOWN = "?"
-RESERVED = (UNKNOWN, "Unsorted", "Not sorted")   # names Synla uses itself, so no project can have them
+NOT_WORK = "Not work"    # private time at the computer: shown in the day, never counted as work, never asked why
+RESERVED = (UNKNOWN, "Unsorted", "Not sorted", NOT_WORK)   # names Synla uses itself, so no project can have them
 
 
 def reserved(name: str) -> bool:
@@ -79,8 +80,11 @@ class Block:
 
     @property
     def main(self) -> Segment:
-        """The segment that took the most time, used as the block's label."""
-        return max(self.segments, key=lambda s: s.minutes)
+        """The segment that took the most time, used as the block's label. Explorer, a dialog or Task Manager never
+        names a block when there is anything else in it."""
+        from .context import glue
+        work = [s for s in self.segments if not glue(s.app, s.title)]
+        return max(work or self.segments, key=lambda s: s.minutes)
 
     def span(self) -> timedelta:
         return self.end - self.start

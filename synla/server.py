@@ -29,9 +29,9 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import record, recorder, report, roles, workload
 from .classify import ASK_BELOW
-from .context import d365, outlook_item, strip_app
+from .context import BROWSERS, d365, glue, outlook_item, strip_app
 from .app import OFF, Problem
-from .model import INVISIBLE, KINDS, MANUAL_APP, UNKNOWN, reserved
+from .model import INVISIBLE, KINDS, MANUAL_APP, NOT_WORK, UNKNOWN, reserved
 from .store import write_whole
 
 KEYS = "qwertyui"                         # keys for the kinds of work you see, in order
@@ -112,7 +112,7 @@ main{max-width:900px;margin:0 auto;padding:28px 20px 80px}
 .chip:hover{border-color:var(--muted)}
 .chip.on{border-color:var(--c);background:color-mix(in srgb,var(--c) 13%,var(--surface));box-shadow:inset 0 0 0 1px var(--c)}
 .chip.ghost{color:var(--muted);border-style:dashed;padding-left:14px}
-.gap.isnotwork .kinds{opacity:.35;pointer-events:none}
+.isnotwork .kinds{opacity:.35;pointer-events:none}
 td.code{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}tr.off td{color:var(--muted)}
 .quiet .links{display:flex;gap:18px;flex-wrap:wrap;justify-content:flex-end}
 .stack.free{background:repeating-linear-gradient(135deg,var(--track) 0 6px,var(--paper) 6px 12px)}
@@ -209,7 +209,12 @@ ul.plain{margin:6px 0;padding-left:20px}ul.plain li{margin:4px 0}
 .prow.head{font-size:.85rem;color:var(--muted)}.prow button{justify-self:start}
 .prow[data-archived] input{color:var(--muted);background:var(--paper)}.prow[data-archived] .pname{text-decoration:line-through}
 .field input[type=time]{min-width:0;width:8.5em}.field input[type=number]{min-width:0;width:6em}.chips.calls .chip{padding:6px 18px}
-.choice{display:flex;align-items:center;gap:9px;margin-top:12px;cursor:pointer}.choice input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
+.choice{display:flex;align-items:center;gap:9px;margin-top:12px;cursor:pointer}
+.rolecard small .lab{display:block;font-size:.72rem;letter-spacing:.02em;color:var(--muted);margin-bottom:2px}
+.import{margin-top:14px}.import summary{cursor:pointer;color:var(--accent);font-weight:600}
+.import textarea{font:inherit;width:100%;margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);
+ background:var(--surface);color:var(--ink);resize:vertical}
+.btn.file{position:relative;overflow:hidden;cursor:pointer}.btn.file input{position:absolute;inset:0;opacity:0;cursor:pointer}.choice input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
 .offscreen{position:absolute;left:-9999px;width:1px;height:1px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:var(--ink);color:var(--paper);
  border-radius:12px;padding:11px 16px;display:flex;gap:16px;align-items:center;box-shadow:0 12px 32px #00000040;transition:.2s;z-index:30;max-width:92vw}
@@ -252,7 +257,7 @@ function toast(msg,undo){
 function reveal(c){const m=c.closest('.more');if(m&&m.hidden){m.hidden=false;const b=m.nextElementSibling;if(b&&b.matches('[data-showmore]'))b.hidden=true}}
 function direct(card,sel){const g=$(sel,card);return g?$$(':scope > .chip[data-v]:not([data-notwork])',g):[]}
 function pick(c){if(!c)return;reveal(c);$$('.chip[data-v]',c.closest('.chips')).forEach(x=>{const on=x===c;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on)});
- const g=c.closest('.gap');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'));
+ const g=c.closest('.ask');if(g&&c.closest('.chips.p'))g.classList.toggle('isnotwork',c.hasAttribute('data-notwork'));
  const t=c.closest('.chips.k')&&$('.meeting',c.closest('.ask,.away'));if(t&&c.dataset.v==='travel')t.checked=false}
 function choose(box,sel,v){const c=$$(sel+' .chip[data-v]',box).find(x=>x.dataset.v===v);if(c)pick(c);else $$(sel+' .chip',box).forEach(x=>x.classList.remove('on'))}
 const active=()=>{const e=$('#editor');return e&&!e.hidden?e:$('.ask.q')};
@@ -275,13 +280,12 @@ async function saveOff(card,kind){
 async function save(card){
  if(card.dataset.type==='gap')return saveGap(card);
  if(card.dataset.type==='offday'){const o=$('.chips.p .chip.on',card);if(!o){toast('Pick the kind of day, or I worked.');return}return saveOff(card,o.dataset.v)}
- const p=$('.chips.p .chip.on',card),k=$('.chips.k .chip.on',card);
- if(!p){toast('Pick a '+WORD+' first.');return}
- if(!k){toast('Pick a kind of work.');return}
+ const p=$('.chips.p .chip.on',card),nw=p&&p.hasAttribute('data-notwork'),k=nw?null:$('.chips.k .chip.on',card);
+ if(!p){toast('Pick a '+WORD+', or Not work.');return}
  const res=await post('/api/answer',{date:card.dataset.date,ids:JSON.parse(card.dataset.ids),how:card.dataset.how,
-  asked:card.dataset.asked==='1',project:p.dataset.v,kind:k.dataset.v});
+  asked:card.dataset.asked==='1',project:p.dataset.v,kind:k?k.dataset.v:''});
  if(!res)return;
- await refresh();toast('Saved: '+p.dataset.v+', '+k.dataset.label.toLowerCase()+'.',res.undo);
+ await refresh();toast('Saved: '+(nw?'not work':p.dataset.v+(k?', '+k.dataset.label.toLowerCase():''))+'.',res.undo);
 }
 async function skip(card){
  const res=await post('/api/skip',{date:card.dataset.date,code:card.dataset.code});
@@ -325,8 +329,40 @@ async function addTime(box){
  if(res){await refresh();toast('Added '+from+' to '+to+'.','time:'+res.id)}
 }
 function rows(){return $$('.prow[data-row]').map(r=>({old:r.hasAttribute('data-old')?r.dataset.old:null,
- name:$('.pname',r).value,words:$('.pwords',r).value,code:r.querySelector('.prcode')?r.querySelector('.prcode').value:'',
+ name:$('.pname',r).value,words:$('.pwords',r).value,code:r.querySelector('.prcode')?r.querySelector('.prcode').value:(r.dataset.code||''),
  archived:r.hasAttribute('data-archived')}))}
+function parseList(text){
+ const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).slice(0,500);if(!lines.length)return [];
+ const sep=['\t',';',','].find(s=>lines.filter(l=>l.includes(s)).length>=Math.ceil(lines.length/2));
+ const code=v=>/^[A-Za-z0-9._\-\/]{1,20}$/.test(v)&&/\d/.test(v);
+ let all=lines.map(l=>(sep?l.split(sep):[l]).map(c=>c.trim().replace(/^"(.*)"$/,'$1').trim()));
+ if(all.length>1&&!/\d/.test(lines[0])&&/name|navn|project|prosjekt|code|kode|number|nummer|\bnr\b/i.test(lines[0]))all=all.slice(1);
+ return all.map(cols=>{const at=cols.length>1?cols.findIndex(code):-1,rest=cols.filter((c,i)=>i!==at&&c);
+  return {name:(rest[0]||'').slice(0,60),code:at>=0?cols[at]:'',words:rest.slice(1).join(', ').slice(0,600)}}).filter(r=>r.name);
+}
+function addList(list){
+ const have=new Map($$('.prow[data-row]').map(r=>[$('.pname',r).value.trim().toLowerCase(),r]).filter(x=>x[0]));
+ let added=0;
+ for(const it of list){
+  let r=have.get(it.name.toLowerCase());
+  if(!r){r=$$('.prow[data-row]').find(x=>!$('.pname',x).value.trim()&&!x.hasAttribute('data-old'));
+   if(!r){r=$('#newrow').content.firstElementChild.cloneNode(true);$('#prows').append(r)}
+   $('.pname',r).value=it.name;have.set(it.name.toLowerCase(),r);added++}
+  if(it.words&&!$('.pwords',r).value)$('.pwords',r).value=it.words;
+  const c=r.querySelector('.prcode');if(c&&it.code&&!c.value)c.value=it.code;
+  if(it.code)r.dataset.code=it.code;
+ }
+ toast(added?'Added '+added+' to the list. Check it, then save.':'They were in the list already.');
+}
+function readFile(file){
+ const go=enc=>new Promise(res=>{const f=new FileReader();f.onload=()=>res(String(f.result));f.readAsText(file,enc)});
+ return go('utf-8').then(t=>t.includes('\ufffd')?go('windows-1252'):t);   // Excel in Norway often saves CSV that way
+}
+document.addEventListener('change',async e=>{
+ if(!e.target.matches('[data-importfile]')||!e.target.files.length)return;
+ if(e.target.files[0].size>2000000){toast('That file is too large for a list.');return}
+ addList(parseList(await readFile(e.target.files[0])));e.target.value='';
+});
 let starting=false;
 async function startRecording(){
  if(starting)return;starting=true;toast('Starting the recorder.');
@@ -335,6 +371,7 @@ async function startRecording(){
 document.addEventListener('click',async e=>{
  const on=q=>e.target.closest(q);let b;
  const m=$('#menu');if(m&&m.open&&!on('#menu'))m.open=false;
+ if((b=on('.chips.k .chip[data-v]'))&&b.classList.contains('on')){b.classList.remove('on');b.setAttribute('aria-pressed','false');return}
  if(b=on('.chip[data-v]')){pick(b);return}
  if(b=on('[data-newproject]')){newProject(b);return}
  if(b=on('[data-showmore]')){const m=b.previousElementSibling;m.hidden=false;b.hidden=true;const f=$('.find',m);if(f)f.focus();return}
@@ -369,6 +406,7 @@ document.addEventListener('click',async e=>{
  if(b=on('[data-delete]')){if(confirm(b.dataset.confirm)&&await post('/api/delete',{what:b.dataset.delete})){await refresh();toast('Deleted.')}return}
  if(b=on('[data-print]')){window.print();return}
  if(b=on('[data-pickrole]')){$$('[data-pickrole]').forEach(x=>x.classList.toggle('on',x===b));return}
+ if(b=on('[data-import]')){const t=$('#importlist');addList(parseList(t.value));t.value='';return}
  if(b=on('[data-addrow]')){const row=$('#newrow').content.firstElementChild.cloneNode(true);$('#prows').append(row);$('.pname',row).focus();return}
  if(b=on('[data-removerow]')){b.closest('.prow').remove();return}
  if(b=on('[data-archive]')){const r=b.closest('.prow'),a=!r.hasAttribute('data-archived');r.toggleAttribute('data-archived',a);
@@ -494,7 +532,7 @@ def monday_of(d: date) -> date:
 
 
 def color(app, project: str) -> str:
-    if project in (UNKNOWN, NOT_SORTED, "Unsorted"):
+    if project in (UNKNOWN, NOT_SORTED, "Unsorted", NOT_WORK):
         return "var(--muted)"
     own = app.config.get("projects", {}).get(project)
     if isinstance(own, dict) and HEX.match(str(own.get("color", ""))):
@@ -515,10 +553,10 @@ def ids_attr(ids) -> str:
     return escape(json.dumps(list(ids)), quote=True)
 
 
-def project_chips(app, picked: str = "", keys: bool = True) -> str:
+def project_chips(app, picked: str = "", keys: bool = True, notwork: bool = False) -> str:
     """The projects you use most as buttons, in your list's order, Synla's guess if it is another one, and the rest
-    one search away under More."""
-    shown, more = app.project_choices(picked)
+    one search away under More. notwork: also Not work, for private time at the computer."""
+    shown, more = app.project_choices(picked if picked != NOT_WORK else "")
     w = escape(roles.word(app.config).lower())
 
     def chip(p, i=None):
@@ -530,6 +568,12 @@ def project_chips(app, picked: str = "", keys: bool = True) -> str:
                 f"{escape(p)}</button>")
     new = f"<span class='newp'><button type='button' class='chip ghost' data-newproject>+ New {w}</button></span>"
     html = "".join(chip(p, i) for i, p in enumerate(shown))
+    if notwork:
+        on = picked == NOT_WORK
+        html += (f"<button type='button' class='chip{' on' if on else ''}' aria-pressed='{str(on).lower()}' "
+                 f"data-v='{NOT_WORK}' data-notwork title='Private time. Not counted, and Synla never asks why.'>"
+                 f"{'<span class=key>0</span>' if keys else ''}<i class='sw' style='background:var(--muted)'></i>"
+                 f"Not work</button>")
     if not more:
         return html + new
     return (html + f"<span class='more' hidden><input type='search' class='find' placeholder='Find a {w}' "
@@ -670,7 +714,7 @@ def ask_card(app, d: date, q: dict) -> str:
     it = q["items"][0]
     g = it["guess"]
     n = len(q["items"])
-    known = g.project if g.project in app.projects else ""
+    known = g.project if g.project in app.projects or g.project == NOT_WORK else ""
     meta = [where(it["app"], it["title"]), when_text(it["spans"])]
     hint = (f"Synla thinks {escape(known)}{why(g)}." if known
             else "Synla has no guess yet. Your answer teaches it for next time.")
@@ -681,15 +725,18 @@ def ask_card(app, d: date, q: dict) -> str:
     question = ("Synla sorted this on its own. Is it right?" if spot else
                 "What was this meeting for?" if it["call"] else "What was this?")
     head = "Spot check" if spot and n == 1 else COUNT.get(n, f"{n} quick questions")
+    more = (f"<small> and {it['windows'] - 1} more {'pages' if it['app'].lower().removesuffix('.exe') in BROWSERS else 'windows'}"
+            f"</small>") if it.get("windows", 1) > 1 else ""
     dots = "".join(f"<i class='{'on' if i == 0 else ''}'></i>" for i in range(min(n, 8)))
     return f"""<section class='ask q' data-date='{d}' data-ids='{ids_attr(it["ids"])}' data-how='{"spot" if spot else "window"}'
  data-asked='1' data-code='{escape(it["code"])}'>
 <div class='askhead'><span>{head}</span><span class='prog'>{dots}</span></div>
-<h2>{question}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}</div>
+<h2>{question}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}{more}</div>
 <div class='meta'>{escape(" · ".join(meta))}</div>
-<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known)}</div></div>
+<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known, notwork=True)}</div></div>
 <div class='hint'>{hint}</div>
-<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, g.kind if g.kind in KINDS else "project")}</div></div>
+<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, g.kind if g.kind in KINDS else ("" if known == NOT_WORK else "project"))}</div></div>
+<div class='row kinds'><span class='lab'></span><span class='note'>Optional. Click a kind again to leave it out.</span></div>
 <div class='act'><button type='button' class='skip' data-skip>Skip <span class='key'>Esc</span></button>
 <button type='button' class='save' data-save>Save <span class='key light'>Enter</span></button></div></section>"""
 
@@ -786,11 +833,13 @@ def check_section(app, d: date, bl: list) -> str:
         tag = {"added": "Added", "you": "You", "guess": "Synla", "unsure": "Not sure"}[who]
         wins = {}
         for s in b.segments:
-            w = wins.setdefault(s.key, {"title": shown(s.title, s.app), "minutes": 0.0, "ids": []})
+            w = wins.setdefault(s.key, {"title": shown(s.title, s.app), "minutes": 0.0, "ids": [],
+                                        "glue": glue(s.app, s.title)})
             w["minutes"] += s.minutes
             w["ids"].append(s.id)
-        wl = sorted(wins.values(), key=lambda w: -w["minutes"])
-        more = f" and {len(wl) - 1} more" if len(wl) > 1 else ""
+        real = sorted((w for w in wins.values() if not w["glue"]), key=lambda w: -w["minutes"])
+        more = f" and {len(real) - 1} more" if len(real) > 1 else ""
+        wl = [w for w in real if w["minutes"] >= 1][:6]      # dialogs and glances go with All of it
         p = project_of(b)
         act = (f"<button class='link' data-removetime='{escape(b.segments[0].id)}'>Remove</button>" if manual
                else "<button class='link' data-change>Change</button>")
@@ -809,8 +858,9 @@ def check_section(app, d: date, bl: list) -> str:
     foot = (f"<div class='foot'><span class='note'>Looks right? This marks Synla's {guesses} guesses as checked by you.</span>"
             f"<button class='btn' data-approve='{d}'>All correct</button></div>") if guesses else ""
     editor = (f"<div id='editor' class='ask edit' hidden data-date='{d}' data-how='block' data-ids='[]'><div class='scope'></div>"
-              f"<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app)}</div></div>"
-              f"<div class='row'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, '')}</div></div>"
+              f"<div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, notwork=True)}</div></div>"
+              f"<div class='row kinds'><span class='lab'>Kind of work</span><div class='chips k'>{kind_chips(app, '')}</div></div>"
+              f"<div class='row kinds'><span class='lab'></span><span class='note'>Optional. Click a kind again to leave it out.</span></div>"
               f"<div class='act'><button type='button' class='skip' data-cancel>Cancel</button>"
               f"<button type='button' class='save' data-save>Save</button></div></div>")
     return (f"<section class='panel' id='check' data-panel hidden><h3>The whole day</h3>{''.join(rows)}{foot}{editor}</section>")
@@ -846,8 +896,8 @@ def role_card(app) -> str:
     if app.config.get("role"):
         return ""
     buttons = "".join(f"<button class='btn' data-role='{k}'>{escape(r['name'])}</button>" for k, r in roles.ROLES.items())
-    return (f"<section class='panel rolepick'><b>Which fits your work best?</b> <span class='note'>It picks the words and "
-            f"the choices you see. Change it any time under ⋯.</span><div class='buttons'>{buttons}</div></section>")
+    return (f"<section class='panel rolepick'><b>Which fits your work best?</b> <span class='note'>It picks the kinds of "
+            f"work you choose from. Change it any time under ⋯.</span><div class='buttons'>{buttons}</div></section>")
 
 
 def role_page(app, token: str) -> str:
@@ -855,7 +905,7 @@ def role_page(app, token: str) -> str:
     plain = {**app.config, "kindNames": {}}
     cards = "".join(
         f"<button class='rolecard{' on' if k == current else ''}' data-role='{k}'><b>{escape(r['name'])}</b>"
-        f"<small>{escape(r['word'][1])}. "
+        f"<small><span class='lab'>Kinds of work</span>"
         + escape(", ".join(roles.say({**plain, "role": k}, x) for x in r["kinds"])) + "</small>"
         + (f"<small class='planned'>Planned in this job: "
            f"{escape(', '.join(roles.say({**plain, 'role': k}, x) for x in r['planned']))}</small>" if r.get("planned") else "")
@@ -866,12 +916,12 @@ def role_page(app, token: str) -> str:
         f"<label class='kname'><span>{escape(roles.say(plain, k))}</span><input class='kindname' data-kind='{k}' maxlength='40' "
         f"value='{escape(own.get(k, '') if isinstance(own.get(k), str) else '', quote=True)}' "
         f"placeholder='{escape(roles.say(plain, k), quote=True)}'></label>" for k in roles.role(app.config)["kinds"])
-    body = f"""<h1>Your role</h1><p class='sub'>It picks the words, the choices you see, and which kinds of work count as
-planned in your job. Underneath, the kinds of work are the same for every role, so the record book and earlier weeks
+    body = f"""<h1>Your role</h1><p class='sub'>It picks the kinds of work you choose from, what they are called, and which
+count as planned in your job. Underneath, the kinds of work are the same for every role, so the record book and earlier weeks
 keep their meaning.</p>
 <section class='panel'><div class='roles'>{cards}</div></section>
 <h2>Your own words</h2><section class='panel'><p class='note'>Call a kind of work what you call it, for example Error
-handling instead of Firefighting. Leave a box empty to use your role's word.</p><div class='knames'>{names}</div>
+handling instead of Urgent problems. Leave a box empty to use your role's word.</p><div class='knames'>{names}</div>
 <div class='buttons'><button class='btn' data-savenames>Save</button></div></section>
 <p class='note'>A meeting is not a kind of work. Synla notes that a stretch was a meeting, never what was said, and asks
 what it was for. A meeting about an urgent issue counts as urgent work.</p>
@@ -892,7 +942,9 @@ def today_page(app, d: date, token: str) -> str:
               f"<b>{level.capitalize()}</b></a>")
     head = (f"<div class='dayhead'><div><div class='date'><a class='step' href='/day?date={prev}' aria-label='Previous day'>‹</a>"
             f"{day_title(d)}<a class='step{' off' if nxt > app.last_day() else ''}' href='/day?date={nxt}' aria-label='Next day'>›</a>"
-            f"</div><div class='big'>{hm(nums['total']) if bl else '0 h'}</div></div>{wl}</div>")
+            f"</div><div class='big'>{hm(nums['total']) if bl else '0 h'}</div>"
+            + (f"<div class='note'>And {hm(nums['notwork'])} not work, which is not counted</div>" if nums["notwork"] >= 1 else "")
+            + f"</div>{wl}</div>")
     if q["items"]:
         card = {"gap": gap_card, "offday": offday_card}.get(q["items"][0]["type"], ask_card)(app, d, q)
     elif q.get("spot") and not q["waiting"]:
@@ -938,11 +990,21 @@ def project_rows(rows: list, codes: bool = False) -> str:
     return "".join(out)
 
 
+IMPORT = """<details class='import'><summary>Add from a list you have</summary>
+<p class='note'>Copy the cells in Excel and paste them here, or paste a list with one on each line. Name and code in
+any order, words after them if you have any. A CSV file works too. The list is read here, on this computer.</p>
+<textarea id='importlist' rows='5' aria-label='Your list' placeholder='Data platform; 4500; lakehouse, pipeline'></textarea>
+<div class='buttons'><button type='button' class='btn' data-import>Add to the list</button>
+<label class='btn file'>Choose a CSV file<input type='file' accept='.csv,.txt,.tsv,text/csv,text/plain' data-importfile></label>
+</div></details>"""
+
+
 def setup_page(app, token: str) -> str:
     current = app.config.get("role") or roles.DEFAULT
     cards = "".join(
         f"<button type='button' class='rolecard{' on' if k == current else ''}' data-pickrole='{k}'><b>{escape(r['name'])}</b>"
-        f"<small>{escape(r['word'][1])}. " + escape(", ".join(roles.say({'role': k}, x) for x in r["kinds"][:4])) + "</small></button>"
+        f"<small><span class='lab'>Kinds of work</span>" + escape(", ".join(roles.say({'role': k}, x) for x in r["kinds"][:4]))
+        + ", and more</small></button>"
         for k, r in roles.ROLES.items())
     rows = project_rows([(p, v) for p, v in app.config.get("projects", {}).items()] + [(None, {})] * 2)
     start, end = app.workday
@@ -964,13 +1026,15 @@ itself in. Everything stays on this computer, and only you can see it.</p>
 <li>Window titles are deleted after 14 days. Your hours stay.</li>
 <li>You can pause, or delete everything, at any time.</li></ul></section>
 <ol class='steps'>
-<li class='panel'><h3>Your work</h3><p class='note'>Pick what fits best. It decides the words and the choices you see.</p>
+<li class='panel'><h3>Your work</h3><p class='note'>Pick what fits best. It decides the kinds of work you choose
+from, and what they are called. You can rename them later.</p>
 <div class='roles'>{cards}</div></li>
-<li class='panel'><h3>What you report hours on</h3><p class='note'>One line for each project, customer or area. Add a few
-words you see in window titles when you work on it, such as a customer, a system or a file name. Synla learns the rest
-from your answers.</p><div class='prows' id='prows'><div class='prow head'><span>Name</span><span>Words in window titles,
+<li class='panel'><h3>What you report hours on</h3><p class='note'>One line for each thing you report hours on: a
+project, a customer, a supplier, an area or internal work. Synla calls them all projects. Add a few words you see in
+window titles when you work on it, such as a customer, a system or a file name. Synla learns the rest from your
+answers.</p><div class='prows' id='prows'><div class='prow head'><span>Name</span><span>Words in window titles,
 with commas between</span><span></span></div>{rows}</div><div class='buttons'><button type='button' class='btn' data-addrow>Add a line</button></div>
-<template id='newrow'>{project_rows([(None, {})])}</template></li>
+<template id='newrow'>{project_rows([(None, {})])}</template>{IMPORT}</li>
 <li class='panel'><h3>Your day</h3><div class='field'>Work usually starts <input type='time' id='daystart' value='{escape(start, quote=True)}'>
 and ends <input type='time' id='dayend' value='{escape(end, quote=True)}'></div>
 <div class='field'>A normal week is <input type='number' id='weekly' min='1' max='80' step='0.5' value='{weekly:g}'> hours</div>
@@ -988,7 +1052,7 @@ def projects_page(app, token: str) -> str:
 point Synla to each {escape(one)}, and your code in the reporting system.</p>
 <section class='panel'><div class='prows' id='prows'><div class='prow withcode head'><span>Name</span><span>Words in window
 titles, with commas between</span><span>Code</span><span></span></div>{project_rows(items, codes=True)}</div>
-<template id='newrow'>{project_rows([(None, {})], codes=True)}</template>
+<template id='newrow'>{project_rows([(None, {})], codes=True)}</template>{IMPORT}
 <div class='foot'><button type='button' class='btn' data-addrow>Add a {escape(one)}</button>
 <button type='button' class='save' data-saveprojects>Save</button></div></section>
 <p class='note'>A new name changes the name in your answers and timesheets too. Sealed weeks in the record book keep the
@@ -1584,15 +1648,20 @@ def year_of(q, app) -> int:
 def project_in(app, v) -> str:
     name = clean(v, 60)
     if not name:
-        raise Problem("Pick both a project and a kind of work.")
+        raise Problem("Pick a project, or Not work.")
+    if name == NOT_WORK:
+        return NOT_WORK
     if name not in app.projects:
         raise Problem(f"Pick a {roles.word(app.config).lower()} from the list, or add it first.")
     return name
 
 
 def kind_in(v) -> str:
+    """A kind of work, or "" when you leave it out."""
+    if v in (None, ""):
+        return ""
     if not isinstance(v, str) or v not in KINDS:
-        raise Problem("Pick a kind of work.")
+        raise Problem("Pick a kind of work, or leave it out.")
     return v
 
 
@@ -1827,6 +1896,8 @@ def make_handler(app, token: str, port: int, seen: list | None = None, *, key: s
             if path == "/api/answer":
                 d, ids = day_of(body.get("date")), ids_in(body.get("ids"))
                 project, kind = project_in(app, body.get("project")), kind_in(body.get("kind"))
+                if project == NOT_WORK:
+                    kind = ""                      # not work has no kind of work
                 how = body.get("how") if body.get("how") in ("block", "window", "split", "spot") else "block"
                 app.answer(d, ids, project, kind, how, asked=bool(body.get("asked")))
                 return self._json({"ok": True, "undo": app.last_undo})
@@ -1918,7 +1989,7 @@ def make_handler(app, token: str, port: int, seen: list | None = None, *, key: s
                 for r in given:
                     name = clean(r.get("name"), 60)
                     if name:
-                        projects.append((name, words_in(r.get("words"))))
+                        projects.append((name, words_in(r.get("words")), clean(r.get("code"), 20)))
                 role = body.get("role") or roles.DEFAULT
                 app.setup(role if isinstance(role, str) else "", projects, clean(body.get("start"), 5),
                           clean(body.get("end"), 5), hours_in(body.get("weekly")), bool(body.get("calls")))

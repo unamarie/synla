@@ -84,6 +84,82 @@ def mask(app: str, title: str) -> str:
     return t
 
 
+# ---- what a window is about ---------------------------------------------------------------------------------------
+BROWSERS = {"chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "iexplore", "safari"}
+# Windows that only serve another one: Explorer, file dialogs, search, Task Manager, installers' helpers. They never
+# start or name a stretch of work; they go with what you were doing.
+GLUE_APPS = {"explorer", "taskmgr", "searchhost", "searchapp", "searchui", "shellexperiencehost", "startmenuexperiencehost",
+             "openwith", "pickerhost", "consent", "lockapp", "rundll32", "dllhost", "textinputhost", "pcalua",
+             "systemsettingsbroker", "credentialuibroker", "werfault"}
+GLUE_TITLE = re.compile(r"^(save as|save|open|open file|lagre som|lagre|åpne|window dialog|print|skriv ut|run|kjør|"
+                        r"select (a )?(file|folder|files)|browse for folder|velg (fil|mappe)|program manager|task manager|"
+                        r"oppgavebehandling|user account control|brukerkontokontroll|product license expired|new tab|"
+                        r"ny fane|untitled|downloads|nedlastinger|loading|laster inn|search|søk)$", re.I)
+DOC_APPS = {"excel", "winword", "powerpnt", "acrord32", "acrobat", "notepad", "notepad++", "pbidesktop", "onenote",
+            "visio", "wordpad", "sumatrapdf", "foxitpdfreader", "foxitreader"}
+TERMINALS = {"windowsterminal", "wt", "powershell", "pwsh", "cmd", "conhost", "mintty", "putty", "terminal"}
+# sites where every page is its own document, so the page and not the site says what you worked on
+DOC_SITES = {"google docs", "google sheets", "google slides", "google dokumenter", "google regneark",
+             "google presentasjoner", "confluence", "notion", "miro", "figma", "jira", "sharepoint", "onedrive"}
+EXT_END = re.compile(r"\.(xlsx|xlsm|xls|csv|docx|doc|pptx|ppt|pdf|txt|vsdx|pbix|one)$", re.I)
+SITE_SPLIT = re.compile(r"\s+[-|\u2013\u2014·•]\s+")
+TAG = re.compile(r"\s*[\[(](protected view|beskyttet visning|read-only|skrivebeskyttet|compatibility mode|"
+                 r"kompatibilitetsmodus|unlicensed product|ikke-lisensiert produkt|autorecovered|autogjenopprettet)[\])]",
+                 re.I)
+
+
+def glue(app: str, title: str) -> bool:
+    """A window that only serves another one, such as Explorer, a Save As dialog or Task Manager."""
+    return norm(app or "").removesuffix(".exe") in GLUE_APPS or bool(GLUE_TITLE.match(strip_app(title or "")))
+
+
+def site(title: str) -> str:
+    """The site of a browser tab: the last part of its title (Gmail, Google Gemini), or the page itself."""
+    parts = [p.strip() for p in SITE_SPLIT.split(strip_app(title or "")) if p.strip()]
+    if not parts:
+        return ""
+    s = parts[-1] if len(parts) >= 2 and len(parts[-1]) <= 40 else parts[0]
+    s = norm(s)
+    if s in DOC_SITES and len(parts) >= 2:
+        return f"{s}: {norm(parts[0])[:60]}"
+    if s.startswith("google") and ("søk" in s or "search" in s):
+        return "google search"
+    return s[:60]
+
+
+def thing(app: str, title: str) -> str:
+    """What a window is about, so one piece of work stays together when you jump between windows: the site in a
+    browser, the file in Excel or Word, the email in Outlook, otherwise the program. Empty for a window that only
+    serves another one."""
+    a = norm(app or "").removesuffix(".exe")
+    t = strip_app(title or "")
+    if glue(app, title) or not (a or t):
+        return ""
+    if a in TERMINALS:
+        return "app:terminal"
+    if a in ("code", "vscode"):                 # the folder you work in, not each file in it
+        return "code:" + norm(SITE_SPLIT.split(t)[-1])[:60]
+    if a in DOC_APPS:                           # the document, with or without its extension in the title
+        return "file:" + EXT_END.sub("", norm(TAG.sub("", SITE_SPLIT.split(t)[0])))[:60]
+    m = FILE.search(t)
+    if m:                                       # a file name says it best, also in a browser
+        return "file:" + norm(m.group(1)).split("\\")[-1].split("/")[-1]
+    if a in BROWSERS:
+        return "site:" + site(t)
+    if a in OUTLOOK_APPS and outlook_item(app, title) in ("email", "invite"):
+        return "subject:" + norm(EMAIL_SUBJECT.sub(r"\1", t))[:60]
+    if a == "applicationframehost":            # Windows' own apps (Settings, Get Help) all run in this one
+        return "app:" + norm(t)[:40]
+    return "app:" + a
+
+
+def is_private(app: str, title: str, privacy: dict) -> bool:
+    """A window from an app, or with a word in its title, on your private list."""
+    a, t = (app or "").lower(), (title or "").lower()
+    return a in {str(x).lower() for x in privacy.get("skipApps", [])} or \
+        any(str(w).lower() in t for w in privacy.get("skipTitleWords", []) if str(w).strip())
+
+
 def d365(title: str) -> tuple | None:
     """("ce" or "fo", record type, record name or page) for a Dynamics 365 tab, else None."""
     t = (title or "").strip()
@@ -162,6 +238,10 @@ def _features(app: str, title: str, call: bool) -> list:
     if not t:
         return out
     out.append(f"win:{a}|{norm(t)[:80]}")      # the exact same window as before: the strongest clue of all
+    if a in BROWSERS:                          # the site: Gmail, a web shop, an internal system
+        s = site(t)
+        if s:
+            out.append(f"site:{s}")
 
     for m in FILE.finditer(t):
         stem = norm(m.group(1)).split("\\")[-1].split("/")[-1]

@@ -2,12 +2,13 @@
 import re
 from datetime import datetime, timedelta, timezone
 
-from .context import mask
+from .context import mask, thing
 from .model import MANUAL_APP, Block, Guess, Segment
 
 MERGE_GAP = timedelta(seconds=60)    # same window again within a minute: same segment
-BLOCK_GAP = timedelta(minutes=5)     # same guess again within five minutes: same block
-NOISE = 1.0                          # minutes; shorter uncertain segments (alt-tab, a glance) join the block before
+BLOCK_GAP = timedelta(minutes=5)     # the same work again within five minutes: same block
+NOISE = 1.0                          # minutes; a shorter window is a glance or a quick visit
+SURE = 0.7                           # a guess at least this sure groups by its answer; an unsure one by what it is about
 
 # Calls. In a call you often don't touch the keyboard, so that time must not count as away.
 # Teams meeting windows are named after the meeting, so for Teams any window counts, except its own sections
@@ -68,13 +69,17 @@ def _subtract(start, end, holes):
     return pieces
 
 
-def segments(window_events: list, afk_events: list) -> list:
-    """Window events minus idle time, merged when the same window continues. Calls keep their idle time."""
+def segments(window_events: list, afk_events: list, private=None) -> list:
+    """Window events minus idle time, merged when the same window continues. Calls keep their idle time.
+    private(app, title): True for a window on your private list. It is shown as Private with no name, whatever
+    recorded it: ActivityWatch knows nothing of your list, and words you add later apply to earlier days too."""
     idle = _intervals(afk_events, want="afk")
     out: list[Segment] = []
     for start, end, data in _intervals(window_events):
         app = data.get("app", "")
         title = mask(app, data.get("title", ""))          # names from ActivityWatch are hidden the same way
+        if private and app != "Private" and private(app, title):
+            app, title = "Private", ""
         call = bool(data.get("call")) or looks_like_call(app, title)
         holes = [h for h in idle if h[1] - h[0] > CALL_MAX_IDLE] if call else idle
         for s, e in _subtract(start, end, holes):
@@ -94,25 +99,98 @@ def segments(window_events: list, afk_events: list) -> list:
 
 
 def blocks(segs: list, classifier, decisions: dict | None = None) -> list:
-    """Group segments with the same guess into blocks. `decisions` holds the user's answers, keyed by segment id."""
+    """Groups segments into blocks, the stretches of work you review. `decisions` holds your answers by segment id.
+
+    What you answered stays together by answer, and what Synla is sure of by its guess. What it is unsure of stays
+    together by what it is about (the site, the file, the program), so an evening of jumping between notes, a game
+    install and private email does not become one bundle. Explorer, dialogs and Task Manager go with the work around
+    them. A visit of under a minute between two stretches of the same work is an interruption and stays inside;
+    a visit of under a minute on the way to something else goes with that."""
     decisions = decisions or {}
-    out: list[Block] = []
+    seen = []
     for seg in segs:
         d = decisions.get(seg.id)
         if d:
-            g, confirmed = Guess(d["project"], d["kind"], 1.0, ["you said so"]), True
+            g, confirmed = Guess(d["project"], d.get("kind") or "", 1.0, ["you said so"]), True
         else:
             g, confirmed = classifier.guess(seg.app, seg.title, seg.call), False
-        last = out[-1] if out else None
-        same = last and (last.guess.project, last.guess.kind) == (g.project, g.kind) and last.confirmed == confirmed \
-            and (last.main.app == MANUAL_APP) == (seg.app == MANUAL_APP)     # time you added stays its own block
-        close = last and seg.start - last.end <= BLOCK_GAP
-        noise = last and close and not confirmed and not last.confirmed and seg.minutes < NOISE and g.confidence < 0.7
-        if last and close and (same or noise):
-            last.segments.append(seg)
-            if same:
-                last.guess.confidence = min(last.guess.confidence, g.confidence) if not confirmed else 1.0
-                last.guess.reasons = list(dict.fromkeys(last.guess.reasons + g.reasons))[:4]
+        if seg.app == MANUAL_APP:
+            key = ("added", seg.id)                       # time you added stays its own block
+        elif confirmed:
+            key = ("you", g.project, g.kind)
         else:
-            out.append(Block(seg.start.strftime("%Y%m%dT%H%M%S"), [seg], g, confirmed))
+            what = thing(seg.app, seg.title)
+            key = None if not what else ("guess", g.project, g.kind) if g.confidence >= SURE and g.project != "?" \
+                else ("about", what)                     # None: a window that only serves another one
+        seen.append((seg, g, confirmed, key))
+
+    out: list[Block] = []
+    keys: list = []
+    waiting = []                                          # Explorer and dialogs before the first stretch of work
+    for i, (seg, g, confirmed, key) in enumerate(seen):
+        last = out[-1] if out else None
+        close = last is not None and seg.start - last.end <= BLOCK_GAP and keys[-1][0] != "added"
+        if key is None:
+            if close:
+                last.segments.append(seg)
+            else:
+                waiting.append(seg)
+            continue
+        if close and keys[-1] == key:
+            last.segments.append(seg)
+            if key[0] == "guess":
+                last.guess.confidence = min(last.guess.confidence, g.confidence)
+                last.guess.reasons = list(dict.fromkeys(last.guess.reasons + g.reasons))[:4]
+            elif key[0] == "about":
+                last.guess.confidence = min(last.guess.confidence, g.confidence)
+            continue
+        if close and not confirmed and key[0] != "added" and seg.minutes < NOISE and _back_to(seen, i, keys[-1], seg):
+            last.segments.append(seg)                      # an interruption: back to the same work right after
+            continue
+        out.append(Block(seg.start.strftime("%Y%m%dT%H%M%S"), waiting + [seg], g, confirmed))
+        keys.append(key)
+        waiting = []
+    if waiting:
+        if out and keys[-1][0] != "added":
+            out[-1].segments.extend(waiting)
+        else:
+            out.append(Block(waiting[0].start.strftime("%Y%m%dT%H%M%S"), waiting,
+                             classifier.guess(waiting[0].app, waiting[0].title, waiting[0].call), False))
+            keys.append(("about", ""))
+    return _visits(out, keys)
+
+
+def _back_to(seen: list, i: int, key: tuple, seg) -> bool:
+    """True if, after window i, you are back at the work with this key within a minute."""
+    for nxt, _, _, k in seen[i + 1:]:
+        if nxt.start - seg.end > timedelta(minutes=1):
+            return False
+        if k is None:
+            continue                                     # a dialog on the way back
+        return k == key
+    return False
+
+
+def _visits(out: list, keys: list) -> list:
+    """A stretch of under a minute that Synla is unsure of, such as a search on the way to a site, joins the work
+    right after it, or the work before it at the end of a run. Answered stretches and time you added stay as they are."""
+    def small(i):
+        return keys[i][0] == "about" and out[i].minutes < NOISE
+
+    def open_to(i):
+        return keys[i][0] in ("about", "guess")
+    i = len(out) - 2
+    while i >= 0:
+        if small(i) and open_to(i + 1) and out[i + 1].start - out[i].end <= BLOCK_GAP:
+            out[i + 1].segments[:0] = out[i].segments
+            out[i + 1].id = out[i].id
+            del out[i], keys[i]
+        i -= 1
+    i = 1
+    while i < len(out):
+        if small(i) and open_to(i - 1) and out[i].start - out[i - 1].end <= BLOCK_GAP:
+            out[i - 1].segments.extend(out[i].segments)
+            del out[i], keys[i]
+            continue
+        i += 1
     return out

@@ -22,6 +22,7 @@ What Synla does so your data stays yours and stays right. Each point has a test 
 - Names lose control characters and text direction characters, so nothing hidden or reversed is kept.
 - A window name with a broken character is kept with a ?, and never longer than 1000 characters.
 - Activity is only read on this computer. An ActivityWatch address that points elsewhere is not used.
+- Your private list applies to everything Synla reads, also ActivityWatch, which knows nothing of the list.
 - CSV files and the copied table never hold formulas: a cell that starts with = + - or @ gets a ' in front.
 
 ## Files

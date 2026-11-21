@@ -17,6 +17,14 @@ employer could use to monitor anyone.
 - **Synla asks, you tap.** It works out what your time was for from file names, folders, email threads, chat names
   and item, order or change numbers, not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
   with its best guess already picked. Press a number for the project, a letter for the kind of work, Enter to save.
+  The kind of work is optional: click it again to leave it out.
+- **Keeps each thing apart when you jump around.** What Synla is unsure of stays together by what it is about: the
+  site in a browser, the file in Excel or Word, the email in Outlook, otherwise the program. An evening of notes, a
+  game install and private email becomes a stretch of each, not one bundle. Explorer, dialogs and Task Manager go with
+  the work around them and never name it, a glance of under a minute stays inside the work you return to, and a quick
+  search goes with the site it led to. Many small pages of one site, such as emails in Gmail, become one question.
+- **Not work, for private time at the computer.** Shown in your day, never counted as work, never asked why. Synla
+  learns it like anything else, and calls time not work on its own only when it is sure.
 - **A few questions, fewer every day.** Only windows of 5 minutes or more, at most five a day. Smaller things keep
   Synla's best guess. In the demo week it asks 5 questions on Monday, then 1, 2 and 3, and none on Friday: eleven
   answers for 40.4 hours, with 99.7 % of the time on the right project and kind. One answer is enough for the same
@@ -33,8 +41,9 @@ employer could use to monitor anyone.
 - **Shows what keeps coming back.** When the same failure or cleanup returns, the week says so: "Came back on
   4 days since 12 Aug, 6.5 h in all". Window names are deleted after 14 days, so Synla keeps counting for 90 days with
   one-way codes, the same way it stores what it learns.
-- **Fits your role.** Pick Analyst or specialist, Product owner, Sales, Leader, Coordinator, Accountant or Customer
-  service. The buttons, their order and their names follow the role, and you can rename any of them. The role also
+- **Fits your role.** Pick Analyst or specialist, Accountant, Coordinator, Customer service, HR, IT and systems,
+  Leader, Marketing and communication, Planner or logistics, Product owner, Purchaser, Quality or Sales. The kinds of
+  work, their order and their names follow the role, and you can rename any of them. The role also
   decides what counts as planned: following up is the job of a coordinator, but unplanned work for an analyst. Projects show the five you use most, with a search for the
   rest. After four weeks, kinds of work you never use move under More. The order stays put, so the keys do too.
 - **Undo instead of "are you sure?".** Every answer can be taken back for a few seconds, including what Synla learned
@@ -47,8 +56,8 @@ employer could use to monitor anyone.
   that type of record usually is. Only the title, never the screen or the data.
 - **Makes unplanned work visible.** The weekly summary shows how much time went to helping, firefighting, chasing and
   fixing data, where it came from, and how much happened outside working hours. Urgent work always pushes planned
-  work, so the week says how much: "Firefighting pushed 1.0 h of planned work on Monday and Thursday. Both days ran
-  into the evening."
+  work, so the week says how much: "Urgent problems pushed 1.0 h of planned work on Monday and Thursday. Both days
+  ran into the evening."
 - **Knows days off.** Red days in Norway are worked out on your computer, with no internet. An empty workday gets one
   question: were you off? Vacation, sick, sick child or time off, and never a reason. Days off shorten the normal week
   and go into the timesheet.
@@ -111,18 +120,25 @@ how much it counts in a dispute is for your union representative or a lawyer to 
 ## Roles
 
 Underneath, every role uses the same kinds of work, so the record book and earlier weeks keep their meaning whatever
-you pick. The role decides what you see, what it is called, and which kinds count as planned in that job.
-Urgent work is never planned.
+you pick. The role decides which kinds of work you see, what they are called, and which count as planned in that job.
+Urgent work is never planned. What you report hours on is called a project in every role, whether it is a customer,
+a supplier, an area or internal work: most people report on several of these.
 
-| Role | Projects are called | Planned | Unplanned | Also |
-|---|---|---|---|---|
-| Analyst or specialist | Projects | Planned work | Helping someone, Firefighting, Chasing information, Fixing data | Admin |
-| Product owner | Products | Product work | Helping someone, Quality issues, Chasing answers, Fixing master data | Travel, Admin |
-| Sales | Customers | Customer work | Helping colleagues, Urgent customer issues, Chasing internally, Fixing prices and orders | Travel, Admin and CRM |
-| Leader | Areas | Strategy and planning | Helping someone, Escalations, Chasing information | People, Admin |
-| Coordinator | Projects | Planning and coordination, Following up, Helping people | Urgent changes, Fixing plans and data | Travel, Admin |
-| Accountant | Areas | Planned accounting work | Questions from colleagues, Urgent payments and errors, Chasing documents and approvals, Corrections | Admin |
-| Customer service | Areas | Cases | Helping colleagues, Escalations, Waiting on other teams, Fixing customer data | Admin |
+| Role | Planned | Unplanned | Also |
+|---|---|---|---|
+| Analyst or specialist | Planned work | Helping someone, Urgent problems, Chasing answers, Fixing others' errors | Admin |
+| Accountant | Planned accounting work | Questions from colleagues, Urgent payments and errors, Chasing documents and approvals, Corrections | Admin |
+| Coordinator | Planning and coordination, Following up, Helping people | Urgent changes, Fixing plans and data | Travel, Admin |
+| Customer service | Cases | Helping colleagues, Escalations, Waiting on other teams, Fixing customer data | Admin |
+| HR | Planned HR work, Questions from staff and leaders | Urgent personnel cases, Chasing documents and approvals, Fixing HR data | Hiring and follow-up, Admin |
+| IT and systems | Planned IT work | User support, Incidents, Waiting on vendors, Fixing data and access | Admin |
+| Leader | Strategy and planning | Helping someone, Escalations, Chasing answers | People and team, Admin |
+| Marketing and communication | Planned campaigns and content | Help with texts and slides, Rush requests, Chasing input and approvals, Fixing web and product data | Admin |
+| Planner or logistics | Planning | Questions from colleagues, Urgent changes and shortages, Chasing deliveries, Fixing plans and master data | Admin |
+| Product owner | Product work | Helping someone, Quality issues, Chasing answers, Fixing master data | Travel, Admin |
+| Purchaser | Planned purchasing | Questions from colleagues, Urgent deliveries, Chasing suppliers, Fixing prices and master data | Travel, Admin |
+| Quality | Planned quality work | Questions and advice, Deviations and complaints, Following up actions, Fixing data and documents | Travel, Admin |
+| Sales | Customer work | Helping colleagues, Urgent customer issues, Chasing internally, Fixing prices and orders | Travel, Admin and CRM |
 
 A meeting is not a kind of work in any role. Synla asks what it was for, so a meeting about an urgent issue counts as
 urgent work.
@@ -146,8 +162,10 @@ anything is stored: a chat with a person is kept as "Chat | (person)".
 **Meetings.** Synla notes when you were in a call and asks what it was for. It never records sound, picture, chat or
 a transcript.
 
-**Private windows.** Password managers, private browsing, online banking, NAV, unions, health sites and pharmacies are
-stored as "Private", with no name. You can add to the list in `config.json`; updates only ever add to it.
+**Private windows.** Password managers, private browsing, online banking, NAV, unions, the Labour Inspection
+Authority, whistleblowing cases, health sites and pharmacies are stored as "Private", with no name. The list also
+applies to what Synla reads from ActivityWatch, and words you add apply to earlier days too. You can add to the list
+in `config.json`; updates only ever add to it.
 
 **Paused means paused.** You can pause recording at any time. Synla keeps only when each pause started and ended, never
 asks about that time, and hides anything ActivityWatch recorded during it.
@@ -219,7 +237,8 @@ python -m synla demo
    ![Setup](docs/setup.png)
 
 2. Change your projects later under **⋯ > Your projects**: add, rename, archive, words and codes. Words can be
-   numbers: `4500-` matches every item number that starts with 4500, in ERP and PLM screens too.
+   numbers: `4500-` matches every item number that starts with 4500, in ERP and PLM screens too. Have a list already?
+   Paste it from Excel, or choose a CSV file, on the setup page or on Your projects. It is read on your computer.
 3. At the end of the day, click the reminder (or run `python -m synla`) and answer Synla's questions, including
    the ones about time away from the computer. To see what Synla sorted on its own, click **Check**. If the dot at
    the top is red, click **Start**.
@@ -255,9 +274,11 @@ python -m synla demo
    as a case), never from topic words. Being in a call is not a kind of work: Synla asks what each meeting was for,
    so one escalation call doesn't make every call firefighting.
 5. **Questions.** Below 70 % confidence for a window of 5 minutes or more, Synla asks, biggest first, at most five a
-   day, together with time away from the computer. Stretches in a row with the same guess form one block; short,
-   unclear glances join the block before. Then one spot check on a window of 10 minutes or more that Synla sorted on
-   its own. Nothing on red days or days off.
+   day, together with time away from the computer. Small pages of one site add up to one question. Then one spot
+   check on a window of 10 minutes or more that Synla sorted on its own. Nothing on red days or days off.
+6. **Blocks.** Answered time stays together by answer, and time Synla is sure of by its guess. Unsure time stays
+   together by what it is about, so jumping between windows never makes one bundle. Dialogs, Explorer and Task
+   Manager join the work around them.
 
 Run the tests with `python -m pytest`. GitHub runs them on Linux on every push.
 

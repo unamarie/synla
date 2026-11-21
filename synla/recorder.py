@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from . import protect
-from .context import mask
+from .context import is_private, mask  # noqa: F401  (is_private: kept here for older imports)
 from .source import offset_now
 
 POLL = 5.0                      # seconds between samples
@@ -174,10 +174,6 @@ class WindowsProbe:
 LOCK_APPS = {"lockapp.exe", "logonui.exe"}
 
 
-def is_private(app: str, title: str, privacy: dict) -> bool:
-    a, t = (app or "").lower(), (title or "").lower()
-    return a in {x.lower() for x in privacy.get("skipApps", [])} or \
-        any(w.lower() in t for w in privacy.get("skipTitleWords", []) if w)
 
 
 def tidy(text: str, limit: int) -> str:

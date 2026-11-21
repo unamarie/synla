@@ -1,4 +1,5 @@
 import ast
+from collections import defaultdict
 import base64
 import csv
 import hashlib
@@ -23,7 +24,8 @@ import pytest
 from synla import demo, notify, protect, record, recorder, report, roles, workload
 from synla.__main__ import verify
 from synla.app import DELETED, Synla
-from synla.model import KINDS, MANUAL_APP
+from synla.model import KINDS, MANUAL_APP, NOT_WORK
+from synla.context import glue, thing
 from synla.blocks import segments
 from synla.classify import Classifier
 from synla.context import features
@@ -886,8 +888,8 @@ def test_stretches_and_repeats_on_the_pages(app, server):
 # ---- roles, and the choices you see ----------------------------------------------------------------------------------
 def test_each_role_gets_its_own_words_and_choices(app):
     from synla import roles
-    expect = {"specialist": ("Project", "Planned work"), "product": ("Product", "Product work"),
-              "sales": ("Customer", "Customer work"), "leader": ("Area", "Strategy and planning")}
+    expect = {"specialist": ("Project", "Planned work"), "product": ("Project", "Product work"),
+              "sales": ("Project", "Customer work"), "leader": ("Project", "Strategy and planning")}
     for key, (word, planned) in expect.items():
         app.config["role"] = key
         shown, more = app.kind_choices()
@@ -933,7 +935,7 @@ def test_roles_over_http(app, server):
     assert post(f"{base}/api/settings", {"role": "sales", "kindNames": {"admin": "  CRM   and admin ", "x": "y"}}, OK) == 200
     assert app.config["role"] == "sales" and app.config["kindNames"] == {"admin": "CRM and admin"}
     page = LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
-    assert "<span class='lab'>Customer</span>" in page and "Customer work" in page and "CRM and admin" in page
+    assert "<span class='lab'>Project</span>" in page and "Customer work" in page and "CRM and admin" in page
     assert "Which fits your work best?" not in page
 
 
@@ -1012,7 +1014,7 @@ def test_urgent_work_pushes_planned_work(app, server):
     assert s["urgent_hours"] == s["by_kind"]["firefighting"] and 0 < s["pushed_hours"] < s["urgent_hours"]
     assert "pushed" in report.text(s)
     html = LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
-    assert "Firefighting pushed" in html and "ran into the evening" in html
+    assert "Urgent problems pushed" in html and "ran into the evening" in html
     app.config["kindNames"] = {"firefighting": "Error handling"}
     assert "Error handling pushed" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
     live = server_week(app)
@@ -1026,7 +1028,7 @@ def test_urgent_work_pushes_planned_work(app, server):
     for d, x in live["days"].items():
         assert abs(sealed["days"][d]["urgent"] - x["urgent"]) < 0.05
         assert abs(sealed["days"][d]["pushed"] - x["pushed"]) < 0.25
-    assert "Firefighting pushed" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
+    assert "Urgent problems pushed" in LOCAL.open(f"{base}/week?date={MONDAY.date()}").read().decode()
 
 
 def server_week(app):
@@ -1803,3 +1805,113 @@ def test_the_dot_stays_on_while_you_are_away(tmp_path, server, app):
     old = time_module.time() - 200                                   # a recorder that was stopped by force
     os.utime(app.store.dir / recorder.BEAT, (old, old))
     assert "Not recording" in LOCAL.open(f"{base}/day?date={MONDAY.date()}").read().decode()
+
+
+# ---- an evening of jumping between windows -------------------------------------------------------------------------
+CHROME = " - Google Chrome"
+EVENING = [  # (app, title, seconds): Obsidian, Gemini, private email, Windows settings, a game install, a game
+    ("obsidian.exe", "Obsidian", 420), ("chrome.exe", "gemini - Google-søk" + CHROME, 20),
+    ("chrome.exe", "gemni - Bing" + CHROME, 15), ("chrome.exe", "Google Gemini" + CHROME, 70),
+    ("chrome.exe", "New chat - Google Gemini" + CHROME, 40), ("obsidian.exe", "Obsidian", 300),
+    ("explorer.exe", "Downloads", 12), ("obsidian.exe", "Obsidian", 200),
+    ("chrome.exe", "Innboks (12) - (email) - Gmail" + CHROME, 25),
+    ("chrome.exe", "Re: Tekna membership - (email) - Gmail" + CHROME, 70),
+    ("chrome.exe", "Sendt e-post - (email) - Gmail" + CHROME, 40), ("obsidian.exe", "Obsidian", 240),
+    ("GetHelp.exe", "Få hjelp", 180), ("optionalfeatures.exe", "Windows Features", 120),
+    ("taskmgr.exe", "Task Manager", 400), ("obsidian.exe", "Obsidian", 180),
+    ("chrome.exe", "Retro Racer download - Google-søk" + CHROME, 25), ("chrome.exe", "Save As" + CHROME, 10),
+    ("setup.exe", "Retro Racer - InstallShield Wizard", 70), ("explorer.exe", "Game Files", 60),
+    ("chatgpt.exe", "ChatGPT", 240), ("chrome.exe", "Retro Racer in your browser" + CHROME, 54 * 60),
+]
+
+
+def evening_app(tmp_path, items=EVENING):
+    t, win = datetime(2026, 11, 2, 19, 0).astimezone(), []
+    for a, title, sec in items:
+        win.append({"timestamp": t.isoformat(), "duration": sec, "data": {"app": a, "title": title}})
+        t += timedelta(seconds=sec)
+    (tmp_path / "evening.json").write_text(json.dumps({"window": win, "afk": []}), encoding="utf-8")
+    store = Store(tmp_path)
+    store.save_config({"projects": {"Supplier audit": {"keywords": ["supplier"]}}, "source": str(tmp_path / "evening.json"),
+                       "setupDone": True})
+    return Synla(store)
+
+
+def test_jumping_around_keeps_each_thing_apart(tmp_path):
+    app = evening_app(tmp_path)
+    bl = app.day(date(2026, 11, 2))
+    names = [b.main.title for b in bl]
+    for b in bl:                                                        # no bundles: one thing per block, plus glances
+        big = defaultdict(float)
+        for s in b.segments:
+            if not glue(s.app, s.title):
+                big[thing(s.app, s.title)] += s.minutes
+        assert len([m for m in big.values() if m >= 1]) == 1, [s.title for s in b.segments]
+    assert "Task Manager" not in names and all(not glue(b.main.app, b.main.title) for b in bl)
+    gemini = next(b for b in bl if "Gemini" in b.main.title)
+    assert any("Google-søk" in s.title for s in gemini.segments)        # the search on the way there goes with it
+    first = bl[1] if "Gemini" in bl[1].main.title else bl[0]
+    assert names[-1].startswith("Retro Racer in your browser") and bl[-1].minutes == 54
+    notes = [b for b in bl if b.main.title == "Obsidian"]
+    assert any(any(s.app == "explorer.exe" for s in b.segments) for b in notes)    # a dialog goes with the work
+    assert first and len(bl) <= 12
+    assert any(b.main.app == "Private" for b in bl)                     # the union email is private, also from ActivityWatch
+    assert not any("Tekna" in s.title for b in bl for s in b.segments)
+
+
+def test_not_work_is_shown_but_never_counted(tmp_path):
+    app = evening_app(tmp_path)
+    d = date(2026, 11, 2)
+    game = next(b for b in app.day(d) if b.main.title.startswith("Retro Racer in your browser"))
+    total = app.day_numbers(d)["total"]
+    app.answer(d, [s.id for s in game.segments], NOT_WORK, "")
+    assert app.day_numbers(d)["notwork"] == 54 and app.day_numbers(d)["total"] == pytest.approx(total - 54)
+    assert all(b.guess.project != NOT_WORK for bl in app.week(d).values() for b in bl)
+    st = app.statement(d - timedelta(days=d.weekday()))
+    assert NOT_WORK not in st["projects"] and st["totalHours"] == pytest.approx((total - 54) / 60, abs=0.01)
+    again = app.classifier.guess(game.main.app, game.main.title)
+    assert (again.project, again.kind) == (NOT_WORK, "")                # learned, and no kind of work for it
+    assert app.store.corrections()[-1]["answer"] == [NOT_WORK, ""]
+
+
+def test_a_kind_of_work_can_be_left_out(app, server):
+    base, _ = server
+    d = MONDAY.date()
+    q = app.questions(d)["items"][0]
+    status, _ = post_json(f"{base}/api/answer", {"date": str(d), "ids": q["ids"], "project": "Internal", "kind": ""}, OK)
+    assert status == 200 and {app.store.decisions()[i]["kind"] for i in q["ids"]} == {""}
+    st = app.statement(d)
+    assert any(r["kind"] == "none" for day in st["days"] for r in day["stretches"])
+    assert app.store.corrections()[-1]["right"] in (True, False)
+    html = LOCAL.open(f"{base}/day?date={d}").read().decode()
+    assert "data-notwork" in html and "Click a kind again to leave it out" in html
+    assert post(f"{base}/api/answer", {"date": str(d), "ids": q["ids"], "project": NOT_WORK, "kind": "admin"}, OK) == 200
+    assert {app.store.decisions()[i]["kind"] for i in q["ids"]} == {""}  # not work never has a kind
+
+
+def test_small_pages_of_one_site_become_one_question(tmp_path):
+    mail = [("chrome.exe", f"Email {i} - (email) - Gmail" + CHROME, 100) for i in range(5)]
+    app = evening_app(tmp_path, [("obsidian.exe", "Obsidian", 600)] + mail + [("obsidian.exe", "Obsidian", 600)])
+    items = app.questions(date(2026, 11, 2))["items"]
+    gmail = [it for it in items if "Gmail" in it["title"]]
+    assert len(gmail) == 1 and gmail[0]["windows"] == 5 and len(gmail[0]["ids"]) == 5
+
+
+def test_more_roles_and_plain_words():
+    assert {"purchasing", "quality", "hr", "marketing", "it", "planner"} <= set(roles.ROLES)
+    assert list(roles.ROLES)[0] == roles.DEFAULT
+    assert roles.say({"role": "purchasing"}, "chasing") == "Chasing suppliers"
+    assert roles.say({}, "firefighting") == "Urgent problems" and roles.say({}, "people") == "People and team"
+    assert "helping" not in roles.unplanned({"role": "hr"}) and "firefighting" in roles.unplanned({"role": "hr"})
+
+
+def test_setup_keeps_codes_from_an_imported_list(tmp_path):
+    app = Synla(Store(tmp_path))
+    app.setup("purchasing", [("Acme", ["acme"], "4500"), ("Fjord", [])], "08:00", "16:00", 37.5, False)
+    assert app.config["projects"] == {"Acme": {"keywords": ["acme"], "code": "4500"}, "Fjord": {"keywords": []}}
+
+
+def test_task_manager_is_never_a_question(tmp_path):
+    app = evening_app(tmp_path)
+    items = app.questions(date(2026, 11, 2))["items"] + app.unsorted_windows(app.day(date(2026, 11, 2)), limit=100)
+    assert items and not any(glue(it["app"], it["title"]) for it in items)

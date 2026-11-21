@@ -17,14 +17,14 @@ import math
 from collections import defaultdict
 
 from .context import features
-from .model import Guess, UNKNOWN
+from .model import NOT_WORK, Guess, UNKNOWN
 
 # How much a feature type is worth. A file name or an email subject is a strong clue; the app name is weak.
-TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "id": 3.0, "record": 3.0, "folder": 2.5, "is": 1.5, "rec": 1.5,
-               "word": 1.0, "app": 0.6, "ext": 0.3}
+TYPE_WEIGHT = {"win": 4.0, "file": 3.0, "subject": 3.0, "id": 3.0, "record": 3.0, "folder": 2.5, "site": 2.0, "is": 1.5,
+               "rec": 1.5, "word": 1.0, "app": 0.6, "ext": 0.3}
 # How many answers a clue needs before it is trusted. The very same window again is trusted after one answer, so
 # Synla does not ask about it twice; a word needs a few.
-TRUST = {"win": 0.5, "id": 1.0, "record": 1.0}
+TRUST = {"win": 0.5, "id": 1.0, "record": 1.0, "site": 1.0}
 
 # Built-in clues for the kind of work. Learning from the user can override any of these.
 KIND_RULES = {          # a call is not a kind of work: Synla notes the meeting itself and asks what it was for
@@ -86,7 +86,7 @@ class Classifier:
         for f in features(app, title, call):
             c = self.code(f)
             for target, label in (("project", project), ("kind", kind)):
-                if not counts(target, f):
+                if not label or not counts(target, f):     # no kind given: only the project is learned
                     continue
                 votes = self.memory[target][c]
                 votes[label] = votes.get(label, 0.0) + weight
@@ -146,7 +146,11 @@ class Classifier:
         pv = {p: v for p, v in pv.items() if p not in self.archived}
         project, pc = self._pick(pv)
         kind, kc = self._pick(kv)
-        if kind == UNKNOWN and project != UNKNOWN:
+        if project == NOT_WORK and pc < ASK_BELOW:
+            project = UNKNOWN                       # Synla only calls time not work when it is sure: it is left out
+        if project == NOT_WORK:
+            kind, kc = "", pc                       # not work has no kind of work
+        elif kind == UNKNOWN and project != UNKNOWN:
             kind, kc = "project", pc                # a known project and no other clue: ordinary project work
         reasons = sorted(pwhy.get(project, []) + kwhy.get(kind, []), reverse=True)
         nice = list(dict.fromkeys(explain(r) for _, r in reasons))[:3]
@@ -166,6 +170,6 @@ def explain(f: str) -> str:
         return CLUES.get(f, val)
     if rule:
         return f'keyword in "{val[:30]}"'
-    return {"win": "same window as before", "file": f"file {val[:30]}", "subject": "same email thread",
+    return {"win": "same window as before", "file": f"file {val[:30]}", "site": f"site {val[:30]}", "subject": "same email thread",
             "folder": f"folder {val[:30]}", "app": f"app {val}", "word": f'word "{val[:30]}"',
             "id": f'number "{val[:30]}"', "record": f'record "{val[:30]}"', "rec": f"a {val} record"}.get(kind, f[:30])

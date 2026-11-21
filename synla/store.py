@@ -138,7 +138,9 @@ DEFAULT_CONFIG = {
         "skipApps": ["keepass.exe", "keepassxc.exe", "1password.exe", "bitwarden.exe", "lastpass.exe"],
         "skipTitleWords": ["InPrivate", "Incognito", "Private Browsing", "Privat nettlesing", "nettbank",
                            "Helsenorge", "nav.no", "Sykmelding", "Sykemelding", "Legevakt", "Psykolog", "apotek",
-                           "Fagforbundet", "fagforening", "Tekna", "Negotia", "Akademikerne", "Parat.com"],
+                           "Fagforbundet", "fagforening", "Tekna", "Negotia", "Akademikerne", "Parat.com", "NITO",
+                           "Econa", "Fellesforbundet", "Handel og Kontor", "Utdanningsforbundet", "Juristforbundet",
+                           "Samfunnsviterne", "lo.no", "Arbeidstilsynet", "varslingssak"],
     },
 }
 

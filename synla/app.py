@@ -7,10 +7,11 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from . import holidays, protect, recorder, report, roles, workload
 from .blocks import _subtract, blocks, segments
+from .context import glue, is_private, thing
 from .classify import ASK_BELOW, Classifier
 from .blocks import NOISE
 from .context import source_key
-from .model import INVISIBLE, KINDS, MANUAL_APP, MANUAL_TITLE, UNKNOWN, Segment, reserved
+from .model import INVISIBLE, KINDS, MANUAL_APP, MANUAL_TITLE, NOT_WORK, UNKNOWN, Segment, reserved
 from .record import FORMAT, RecordBook, renamed
 from .source import AW_URL, ActivityWatch, Auto, JsonFile, SynlaRecorder, day_range, on_this_computer
 from .store import utc_key
@@ -131,7 +132,8 @@ class Synla:
         given = {}
         used = {v.get("project") for v in self.store.decisions().values() if isinstance(v, dict)}
         used |= {e.get("project") for e in self.store.manual() if isinstance(e, dict)}
-        for name, words in projects:
+        for item in projects:                  # (name, words) or (name, words, code from an imported list)
+            name, words, code = (tuple(item) + ("",))[:3]
             if reserved(name):
                 raise Problem("Synla uses that name itself. Pick another.")
             if name.lower() in {p.lower() for p in given}:
@@ -139,6 +141,8 @@ class Synla:
             old = c.get("projects", {}).get(name)
             given[name] = {k: v for k, v in (old if isinstance(old, dict) else {}).items() if k != "archived"}
             given[name]["keywords"] = words
+            if code:
+                given[name]["code"] = code
         for p, v in c.get("projects", {}).items():      # a project with hours is archived, never dropped
             if p not in given and p in used:
                 given[p] = dict(v if isinstance(v, dict) else {}, archived=True)
@@ -285,7 +289,8 @@ class Synla:
         block unclear. A glance shorter than a minute goes with its block."""
         if b.confirmed or s.app == MANUAL_APP or s.title == DELETED:
             return False
-        g = self.guess(s) if s.minutes >= NOISE else b.guess
+        # a glance, or Explorer, a dialog or Task Manager, goes with its block
+        g = self.guess(s) if s.minutes >= NOISE and not glue(s.app, s.title) else b.guess
         return g.confidence < ASK_BELOW or g.project == UNKNOWN
 
     def _read_day(self, d: date) -> list:
@@ -293,7 +298,8 @@ class Synla:
         time and a trip abroad do not move work into the evening or into the next day."""
         start, end = day_range(d)
         win, afk = self.source.events(start - WIDE, end + WIDE)
-        segs = [x for s in segments(win, afk) for x in _own_day(s, d)]
+        privacy = self.config.get("privacy", {})
+        segs = [x for s in segments(win, afk, lambda a, t: is_private(a, t, privacy)) for x in _own_day(s, d)]
         paused = [(a, b, None) for a, b in self.store.pauses() if a < end + WIDE and start - WIDE < b]
         if paused:                        # paused means paused, also when another program kept recording
             segs = _cut(segs, paused)
@@ -331,11 +337,12 @@ class Synla:
         return segs[0].start.tzinfo if segs else None
 
     def week(self, any_day: date) -> dict:
+        """The week's work, day by day. Time you called Not work is left out of everything that counts hours."""
         monday = any_day - timedelta(days=any_day.weekday())
         out = {}
         for i in range(7):
             d = monday + timedelta(days=i)
-            bl = self.day(d)
+            bl = [b for b in self.day(d) if b.guess.project != NOT_WORK]
             if bl:
                 out[d] = bl
         return out
@@ -350,8 +357,8 @@ class Synla:
             if b.confirmed:
                 continue
             for s in b.segments:
-                if s.title == DELETED or s.app == MANUAL_APP:
-                    continue
+                if s.title == DELETED or s.app == MANUAL_APP or glue(s.app, s.title):
+                    continue                     # Synla never asks what Task Manager or a dialog was
                 unsure = self.unsure(b, s)
                 a = agg.setdefault(s.key, {"key": s.key, "app": s.app, "title": s.title, "unsure": 0.0,
                                            "minutes": 0.0, "ids": [], "blocks": set(), "call": False,
@@ -363,8 +370,31 @@ class Synla:
                 a["blocks"].add(b.id)
                 a["call"] = a["call"] or s.call
                 a["first"], a["last"] = min(a["first"], s.start), max(a["last"], s.end)
+        self._by_site(agg)
         ranked = sorted((a for a in agg.values() if a["unsure"] >= 1), key=lambda a: -a["unsure"])
         return ranked[:limit]
+
+    @staticmethod
+    def _by_site(agg: dict):
+        """Many small pages of one site, such as emails in Gmail, become one question once they add up: one answer
+        covers them all. A page big enough to ask about on its own is still asked about on its own."""
+        groups = defaultdict(list)
+        for a in agg.values():
+            what = thing(a["app"], a["title"])
+            if a["unsure"] < ASK_MIN and what.startswith(("site:", "app:")):
+                groups[what].append(a)
+        for what, members in groups.items():
+            if len(members) < 2 or sum(m["unsure"] for m in members) < ASK_MIN:
+                continue
+            main = max(members, key=lambda m: m["minutes"])
+            for m in members:
+                del agg[m["key"]]
+            agg["thing:" + what] = {
+                "key": "thing:" + what, "app": main["app"], "title": main["title"], "windows": len(members),
+                "unsure": sum(m["unsure"] for m in members), "minutes": sum(m["minutes"] for m in members),
+                "ids": [i for m in members for i in m["ids"]], "blocks": set().union(*(m["blocks"] for m in members)),
+                "call": any(m["call"] for m in members), "first": min(m["first"] for m in members),
+                "last": max(m["last"] for m in members), "spans": [s for m in members for s in m["spans"]]}
 
     def today(self) -> date:
         return self.home or date.today()
@@ -611,8 +641,11 @@ class Synla:
 
     def day_numbers(self, d: date) -> dict:
         """Minutes for the Today page: sorted by you, sorted by Synla on its own, and still unsure."""
-        out = {"total": 0.0, "yours": 0.0, "sure": 0.0, "unsure": 0.0}
+        out = {"total": 0.0, "yours": 0.0, "sure": 0.0, "unsure": 0.0, "notwork": 0.0}
         for b in self.day(d):
+            if b.guess.project == NOT_WORK and (b.confirmed or not self.unsure(b, b.main)):
+                out["notwork"] += b.minutes
+                continue
             for s in b.segments:
                 out["total"] += s.minutes
                 out["yours" if b.confirmed else "unsure" if self.unsure(b, s) else "sure"] += s.minutes
@@ -715,8 +748,9 @@ class Synla:
             for t in touched.values():
                 g = t["block"].guess
                 self.store.log({"block": t["block"].id, "minutes": round(t["minutes"], 1), "how": how, "batch": batch,
-                                "guess": [g.project, g.kind], "confidence": g.confidence,
-                                "answer": [project, kind], "right": [g.project, g.kind] == [project, kind],
+                                "guess": [g.project, g.kind], "confidence": g.confidence, "answer": [project, kind],
+                                # no kind given: only the project can be right or wrong
+                                "right": g.project == project and (not kind or project == NOT_WORK or g.kind == kind),
                                 "was": t["was"], "wasHow": t["wasHow"]})
         self.store.save_decisions(dec)
         self.store.save_memory(self.classifier.dump())
@@ -788,7 +822,7 @@ class Synla:
             for b in bl:
                 by = "added" if b.main.app == MANUAL_APP else ("you" if b.confirmed else "guess")
                 p = b.guess.project if b.guess.project != UNKNOWN else "Unsorted"
-                k = b.guess.kind if b.guess.kind in KINDS else "unsorted"
+                k = b.guess.kind if b.guess.kind in KINDS else "none" if b.confirmed else "unsorted"
                 stretches.append({"start": b.start.isoformat(timespec="minutes"),
                                   "end": b.end.isoformat(timespec="minutes"),
                                   "minutes": round(b.minutes, 1), "project": p, "kind": k, "by": by})
