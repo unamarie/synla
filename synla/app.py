@@ -1,6 +1,7 @@
 """Ties it together: reads activity, applies what Synla has learned and what you have answered."""
 import hashlib
 import secrets
+import sys
 import time as clock
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -69,6 +70,10 @@ class Problem(ValueError):
     """Something Synla cannot do, said in words for you. The pages show the text as it is."""
 
 
+# Synla has its own recorder on Windows, so there it reads ActivityWatch only if you choose it ("source": "activitywatch").
+AW_IN_AUTO = sys.platform != "win32"
+
+
 class Synla:
     def __init__(self, store, notes: bool = True):
         self.store = store
@@ -90,7 +95,7 @@ class Synla:
             self.store.damaged["activityWatchUrl"] = ("activityWatchUrl in config.json points to another computer. "
                                                       f"Synla only reads ActivityWatch on this computer, at {AW_URL}.")
             url = AW_URL
-        self.source = {"auto": lambda: Auto(self.store, url), "synla": lambda: SynlaRecorder(self.store),
+        self.source = {"auto": lambda: Auto(self.store, url, AW_IN_AUTO), "synla": lambda: SynlaRecorder(self.store),
                        "activitywatch": lambda: ActivityWatch(url)}.get(src, lambda: JsonFile(src))()
 
     @property
@@ -220,6 +225,11 @@ class Synla:
         self.store.save_memory({k: v for k, v in mem.items() if k != "version"})
         self.store.rewrite_log(log)
         self._undo = self.last_undo = None      # an undo from before the rename would bring the old names back
+
+    @property
+    def reads_activitywatch(self) -> bool:
+        src = self.config.get("source", "auto")
+        return src == "activitywatch" or (src == "auto" and AW_IN_AUTO)
 
     @property
     def source_name(self) -> str:
@@ -394,7 +404,9 @@ class Synla:
                 "unsure": sum(m["unsure"] for m in members), "minutes": sum(m["minutes"] for m in members),
                 "ids": [i for m in members for i in m["ids"]], "blocks": set().union(*(m["blocks"] for m in members)),
                 "call": any(m["call"] for m in members), "first": min(m["first"] for m in members),
-                "last": max(m["last"] for m in members), "spans": [s for m in members for s in m["spans"]]}
+                "last": max(m["last"] for m in members), "spans": [s for m in members for s in m["spans"]],
+                "pages": [{"title": m["title"], "app": m["app"], "minutes": m["minutes"]}
+                          for m in sorted(members, key=lambda m: -m["minutes"])]}
 
     def today(self) -> date:
         return self.home or date.today()
@@ -959,6 +971,7 @@ class Synla:
             "folder": str(self.store.dir),
             "encrypted": protect.ENCRYPTED,
             "source": self.config.get("source", "auto"),
+            "reads_aw": self.reads_activitywatch,
             "recorder_rows": rec.get("rows", 0),
             "recorder_first": rec.get("first"),
             "recorder_last": recorder.last_seen(self.store),

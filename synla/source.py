@@ -133,13 +133,14 @@ class SynlaRecorder:
 
 
 class Auto:
-    """Synla's recorder first, ActivityWatch second. `used` tells which one answered."""
+    """Synla's recorder first. ActivityWatch second, but only where Synla has no recorder of its own (Mac and Linux):
+    on Windows, Synla never contacts ActivityWatch unless you choose it. `used` tells which one answered."""
 
-    def __init__(self, store, aw_url):
+    def __init__(self, store, aw_url, use_aw: bool = True):
         self.recorder = SynlaRecorder(store)
-        self.aw = ActivityWatch(aw_url)
+        self.aw = ActivityWatch(aw_url) if use_aw else None
         self.used = None
-        self.name = "Synla recorder or ActivityWatch"
+        self.name = "Synla recorder or ActivityWatch" if use_aw else self.recorder.name
         self.away_until = 0.0              # ActivityWatch was not there: do not knock again before this
 
     def events(self, start: datetime, end: datetime):
@@ -147,7 +148,7 @@ class Auto:
             self.used = self.recorder.name
             return self.recorder.events(start, end)
         self.used = None
-        if time.monotonic() < self.away_until:
+        if self.aw is None or time.monotonic() < self.away_until:
             return [], []
         try:
             win, afk = self.aw.events(start, end)

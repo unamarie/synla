@@ -1895,6 +1895,36 @@ def test_small_pages_of_one_site_become_one_question(tmp_path):
     items = app.questions(date(2026, 11, 2))["items"]
     gmail = [it for it in items if "Gmail" in it["title"]]
     assert len(gmail) == 1 and gmail[0]["windows"] == 5 and len(gmail[0]["ids"]) == 5
+    from synla.server import ask_card
+    card = ask_card(app, date(2026, 11, 2), {"items": gmail})            # and you can open the five pages to see them
+    assert "data-inside=" in card and "<ul class='inside'" in card
+    assert all(f"Email {i}" in card for i in range(5)) and "2 min" in card
+
+
+def test_you_can_open_what_a_block_holds(tmp_path):
+    from synla.server import check_section
+    app = evening_app(tmp_path)
+    d = date(2026, 11, 2)
+    bl = app.day(d)
+    html = check_section(app, d, bl)
+    gemini = next(b for b in bl if "Gemini" in b.main.title)
+    search = next(s for s in gemini.segments if "Google-søk" in s.title)
+    assert "data-inside=" in html and "<ul class='inside'" in html
+    assert "Google-søk" in html and "under a minute" in html               # short ones are listed too, not just counted
+
+
+def test_on_windows_synla_never_contacts_activitywatch(tmp_path, monkeypatch):
+    import synla.app
+    from synla.source import Auto
+    auto = Auto(Store(tmp_path), "http://127.0.0.1:5600", use_aw=False)
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("knocked on ActivityWatch"))
+    assert auto.aw is None and auto.events(MONDAY, MONDAY + timedelta(days=1)) == ([], [])
+    monkeypatch.setattr(synla.app, "AW_IN_AUTO", False)
+    app = Synla(Store(tmp_path))
+    assert app.source.aw is None and not app.reads_activitywatch and app.data_info()["reads_aw"] is False
+    app.store.save_config({"source": "activitywatch"})                    # still there for those who choose it
+    app.reload()
+    assert app.reads_activitywatch and app.data_info()["reads_aw"] is True
 
 
 def test_more_roles_and_plain_words():

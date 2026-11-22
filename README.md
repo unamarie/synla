@@ -164,11 +164,11 @@ a transcript.
 
 **Private windows.** Password managers, private browsing, online banking, NAV, unions, the Labour Inspection
 Authority, whistleblowing cases, health sites and pharmacies are stored as "Private", with no name. The list also
-applies to what Synla reads from ActivityWatch, and words you add apply to earlier days too. You can add to the list
+applies to ActivityWatch if you use it, and words you add apply to earlier days too. You can add to the list
 in `config.json`; updates only ever add to it.
 
 **Paused means paused.** You can pause recording at any time. Synla keeps only when each pause started and ended, never
-asks about that time, and hides anything ActivityWatch recorded during it.
+asks about that time, and hides anything recorded during it.
 
 **Time away stays yours.** Questions about time away only cover your workday, and "Not work" keeps nothing but the
 time. Turn the questions off on the **Your data** page.
@@ -207,16 +207,13 @@ recorder at sign-in, the link `synla:open` that the reminder opens, and the name
 **For IT.** [docs/for-it.md](docs/for-it.md) explains on one page what Synla reads, what it never does, where the data
 is and how to remove it.
 
-## Three ways to record
+## How Synla records
 
-| Way | For | Notes |
-|---|---|---|
-| **Synla's own recorder** | Windows (default) | Nothing else to install. Synla controls what is stored and for how long. |
-| **ActivityWatch** | Windows, Mac, Linux | Used automatically if it is running. Its browser extension adds web addresses. |
-| **Demo week** | Trying it out | A made-up week, kept in its own folder. |
+On Windows, Synla records by itself. There is nothing else to install, and Synla decides what is stored and for how
+long. `python -m synla demo` shows a made-up week instead, kept in its own folder.
 
-With `"source": "auto"` (the default), Synla uses its own recorder when it has data for the day, and ActivityWatch
-otherwise.
+On Mac and Linux, Synla has no recorder of its own. It reads [ActivityWatch](https://activitywatch.net) while that runs.
+On Windows, Synla only reads ActivityWatch if you choose it, with `"source": "activitywatch"` in `config.json`.
 
 ## Try it with a made-up week
 

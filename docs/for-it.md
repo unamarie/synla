@@ -16,8 +16,8 @@ computer, and has no server, account or admin view. The code is open source: <ht
 - No keyboard or mouse hooks, no keystrokes, no screenshots, no clipboard, no file contents, no audio.
 - No web addresses: only the browser tab title.
 - No network traffic. Synla's pages listen on 127.0.0.1 only, on a port held exclusively, and open only with a key
-  that Synla gives the browser it starts. If ActivityWatch is installed, Synla reads it on localhost:5600 and never
-  from another computer.
+  that Synla gives the browser it starts. On Windows, Synla uses its own recorder and never contacts ActivityWatch
+  unless the user chooses it. On Mac and Linux it reads ActivityWatch on localhost:5600, never from another computer.
 - No admin rights, services, drivers or scheduled tasks.
 
 ## What it writes

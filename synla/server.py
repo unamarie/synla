@@ -142,6 +142,10 @@ td.code{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .btn{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;color:var(--ink);display:inline-block}
 .btn:hover{border-color:var(--muted);text-decoration:none}
 .link{background:none;border:0;color:var(--sea);cursor:pointer;padding:0}
+.link.inline{font:inherit;text-decoration:underline;text-underline-offset:2px}
+.inside{list-style:none;margin:-2px 0 10px 128px;padding:2px 0 4px 12px;border-left:2px solid var(--line);font-size:.86rem}
+.inside li{display:flex;justify-content:space-between;gap:14px;padding:2px 0}.inside li span{overflow-wrap:anywhere}
+.inside small{color:var(--muted);white-space:nowrap}.ask .inside{margin:6px 0 4px}
 .done{display:flex;gap:16px;align-items:flex-start;padding:22px 26px}
 .ok{width:32px;height:32px;border-radius:50%;background:var(--greenbg);color:var(--green);display:grid;place-items:center;font-weight:700;flex:none}
 .ok.open{background:var(--paper);color:var(--muted);border:1.5px dashed var(--line)}.ok.warn{background:var(--yellowbg);color:var(--ochreink)}
@@ -384,6 +388,7 @@ document.addEventListener('click',async e=>{
   const res=await post('/api/dayoff',{date:b.dataset.date,kind:kind});if(res){await refresh();toast(kind?'Saved: day off.':'Saved: not a day off.',res.undo)}return}
  if(b=on('[data-skip]')){skip(b.closest('.ask'));return}
  if(b=on('[data-cancel]')){$('#editor').hidden=true;return}
+ if(b=on('[data-inside]')){const l=document.getElementById(b.dataset.inside);if(l){l.hidden=!l.hidden;b.setAttribute('aria-expanded',String(!l.hidden))}return}
  if(b=on('[data-change]')){change(b.closest('.crow'));return}
  if(b=on('[data-toggle]')){const x=document.getElementById(b.dataset.toggle);x.hidden=!x.hidden;if(!x.hidden)x.scrollIntoView({behavior:'smooth',block:'nearest'});return}
  if(b=on('[data-more]')){if(await post('/api/more',{date:b.dataset.more}))refresh();return}
@@ -454,6 +459,15 @@ EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ---- small helpers ---------------------------------------------------------------------------------------------------
+def inside_list(rid: str, items: list, limit: int = 20) -> str:
+    """What a block or a question holds: every window or page, longest first, with its time."""
+    li = "".join(f"<li><span>{escape(w['title'])}</span><small>{escape(w['where'])} · "
+                 f"{'under a minute' if w['minutes'] < 1 else hm(w['minutes'])}</small></li>" for w in items[:limit])
+    if len(items) > limit:
+        li += f"<li><small>and {len(items) - limit} more</small></li>"
+    return f"<ul class='inside' id='{rid}' hidden>{li}</ul>"
+
+
 def hm(minutes: float) -> str:
     h, m = divmod(int(round(minutes)), 60)
     return f"{h} h {m} min" if h and m else f"{h} h" if h else f"{m} min"
@@ -725,13 +739,18 @@ def ask_card(app, d: date, q: dict) -> str:
     question = ("Synla sorted this on its own. Is it right?" if spot else
                 "What was this meeting for?" if it["call"] else "What was this?")
     head = "Spot check" if spot and n == 1 else COUNT.get(n, f"{n} quick questions")
-    more = (f"<small> and {it['windows'] - 1} more {'pages' if it['app'].lower().removesuffix('.exe') in BROWSERS else 'windows'}"
-            f"</small>") if it.get("windows", 1) > 1 else ""
+    rid = "in-" + hashlib.sha256(it["key"].encode()).hexdigest()[:10]
+    more = (f"<small> <button type='button' class='link inline' data-inside='{rid}' aria-expanded='false'>and {it['windows'] - 1}"
+            f" more {'pages' if it['app'].lower().removesuffix('.exe') in BROWSERS else 'windows'}</button></small>"
+            ) if it.get("windows", 1) > 1 else ""
+    pages = [{"title": shown(p["title"], p["app"]), "where": where(p["app"], p["title"]), "minutes": p["minutes"]}
+             for p in it.get("pages", [])]
+    inside = inside_list(rid, pages) if it.get("windows", 1) > 1 else ""
     dots = "".join(f"<i class='{'on' if i == 0 else ''}'></i>" for i in range(min(n, 8)))
     return f"""<section class='ask q' data-date='{d}' data-ids='{ids_attr(it["ids"])}' data-how='{"spot" if spot else "window"}'
  data-asked='1' data-code='{escape(it["code"])}'>
 <div class='askhead'><span>{head}</span><span class='prog'>{dots}</span></div>
-<h2>{question}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}{more}</div>
+<h2>{question}</h2><div class='what'>{escape(shown(it["title"], it["app"]))}{more}</div>{inside}
 <div class='meta'>{escape(" · ".join(meta))}</div>
 <div class='row'><span class='lab'>{roles.word(app.config)}</span><div class='chips p'>{project_chips(app, known, notwork=True)}</div></div>
 <div class='hint'>{hint}</div>
@@ -833,12 +852,15 @@ def check_section(app, d: date, bl: list) -> str:
         tag = {"added": "Added", "you": "You", "guess": "Synla", "unsure": "Not sure"}[who]
         wins = {}
         for s in b.segments:
-            w = wins.setdefault(s.key, {"title": shown(s.title, s.app), "minutes": 0.0, "ids": [],
-                                        "glue": glue(s.app, s.title)})
+            w = wins.setdefault(s.key, {"title": shown(s.title, s.app), "where": where(s.app, s.title), "minutes": 0.0,
+                                        "ids": [], "glue": glue(s.app, s.title)})
             w["minutes"] += s.minutes
             w["ids"].append(s.id)
         real = sorted((w for w in wins.values() if not w["glue"]), key=lambda w: -w["minutes"])
-        more = f" and {len(real) - 1} more" if len(real) > 1 else ""
+        rid = f"in{len(rows)}"
+        more = (f" <button type='button' class='link inline' data-inside='{rid}' aria-expanded='false'>and {len(real) - 1}"
+                f" more</button>") if len(real) > 1 else ""
+        inside = inside_list(rid, real) if len(real) > 1 else ""
         wl = [w for w in real if w["minutes"] >= 1][:6]      # dialogs and glances go with All of it
         p = project_of(b)
         act = (f"<button class='link' data-removetime='{escape(b.segments[0].id)}'>Remove</button>" if manual
@@ -853,7 +875,7 @@ def check_section(app, d: date, bl: list) -> str:
             f"<span class='pj'><i class='sw {'uns' if who == 'unsure' else ''}' style='background:{color(app, p)}'></i>"
             f"<span>{escape(p)}<small>{escape(roles.say(app.config, b.guess.kind)) if b.guess.kind in KINDS else ''}"
             f"{' · meeting' if is_meeting(b) and b.guess.kind != 'meeting' else ''}</small></span></span>"
-            f"<span class='by {who}'>{tag}</span>{act}</div>")
+            f"<span class='by {who}'>{tag}</span>{act}</div>{inside}")
     guesses = sum(1 for b in bl if not b.confirmed and not unsure(b))
     foot = (f"<div class='foot'><span class='note'>Looks right? This marks Synla's {guesses} guesses as checked by you.</span>"
             f"<button class='btn' data-approve='{d}'>All correct</button></div>") if guesses else ""
@@ -1503,7 +1525,7 @@ def data_page(app, token: str) -> str:
         ("on" if i["recorder_alive"] or i["recorder_last"] and datetime.now(timezone.utc) - i["recorder_last"] <
          timedelta(minutes=2) else "not running")
     aw_note = ("<p class='note'>ActivityWatch keeps its own history, separate from Synla. Synla can't delete it; "
-               "you can, in ActivityWatch.</p>") if i["source"] in ("auto", "activitywatch") else ""
+               "you can, in ActivityWatch.</p>") if i.get("reads_aw") else ""
     start, signin = "", ""
     if WINDOWS:
         if recording == "not running":
