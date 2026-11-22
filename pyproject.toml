@@ -1,6 +1,6 @@
 [project]
 name = "synla"
-version = "0.10.0"
+version = "1.0.0"
 description = "Logs your hours from what you actually did, and makes the unplanned work visible. Runs only on your own computer."
 requires-python = ">=3.10"
 dependencies = []

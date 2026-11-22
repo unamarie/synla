@@ -8,6 +8,11 @@ into a plan: helping colleagues, firefighting, chasing information and fixing ot
 It is built for the employee. Your data stays on your computer, under your control, and Synla has nothing an
 employer could use to monitor anyone.
 
+> **Version 1, a work in progress.** Synla works and is tested on every change, and it runs every day on Windows. It
+> is still young, so expect changes, and use it on a computer you control. Security and privacy are built in from the
+> start: [docs/security.md](docs/security.md) lists every check, each with a test. Found a problem? See
+> [SECURITY.md](SECURITY.md).
+
 *Synla* comes from the Nynorsk *synleg*, "visible".
 
 ![Today](docs/today.png)

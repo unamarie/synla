@@ -54,3 +54,7 @@ What Synla does so your data stays yours and stays right. Each point has a test 
 
 - Someone signed in as you, or with admin rights, can read your files. Use Synla on a computer you control.
 - Synla is not for a shared server such as a Citrix or Remote Desktop host, where other people use the same computer.
+
+## Report a problem
+
+See [SECURITY.md](../SECURITY.md). Please don't report a security problem in a public issue.
