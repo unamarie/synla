@@ -20,12 +20,12 @@ employer could use to monitor anyone.
 ## What it does
 
 - **Synla asks, you tap.** It works out what your time was for from file names, folders, email threads, chat names
-  and item, order or change numbers, not just which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
+  and item, order or change numbers, as well as which app was open. It sorts what it is sure of on its own and asks about the rest, one window at a time,
   with its best guess already picked. Press a number for the project, a letter for the kind of work, Enter to save.
   The kind of work is optional: click it again to leave it out.
 - **Keeps each thing apart when you jump around.** What Synla is unsure of stays together by what it is about: the
   site in a browser, the file in Excel or Word, the email in Outlook, otherwise the program. An evening of notes, a
-  game install and private email becomes a stretch of each, not one bundle. Explorer, dialogs and Task Manager go with
+  game install and private email is split into a stretch for each. Explorer, dialogs and Task Manager go with
   the work around them and never name it, a glance of under a minute stays inside the work you return to, and a quick
   search goes with the site it led to. Many small pages of one site, such as emails in Gmail, become one question.
 - **Not work, for private time at the computer.** Shown in your day, never counted as work, never asked why. Synla
@@ -118,7 +118,7 @@ conversation, a dispute.
   unplanned work and workload level, with the fingerprint for each week. Print it, save it as PDF or export CSV.
 - **Kept for 5 years** by default (`keepRecordYears`).
 
-This is your own record, not the official one. Your employer keeps the official record of working hours. A record made
+This is your own record. Your employer keeps the official record of working hours. A record made
 at the time, never changed afterwards and timestamped outside your own computer carries more weight than memory, but
 how much it counts in a dispute is for your union representative or a lawyer to judge. This is not legal advice.
 
@@ -292,6 +292,6 @@ Run the tests with `python -m pytest`. GitHub runs them on Linux on every push.
   reading the calendar is approved by IT and other people's meeting titles can be kept private.
 - Half days off, and red days for more countries.
 - Rules you can see and edit: "files in this folder belong to this project".
-- Warnings during the week, when an indicator turns red, not only in the week summary.
+- Warnings during the week as soon as an indicator turns red.
 
 Built by [Una Marie S. Goksøyr](https://unadata.dev). Code under the MIT licence.

@@ -34,7 +34,7 @@ What Synla does so your data stays yours and stays right. Each point has a test 
 - Keys are made once, also when the recorder and the pages start at the same moment.
 - Delete everything also deletes the copies, and empties activity.db while the recorder holds it open. If another
   program holds a file, Synla says which.
-- Deleted window names are overwritten on disk, not just marked as free.
+- Deleted window names are overwritten on disk. Marking the space as free would leave them readable.
 
 ## The record book
 
